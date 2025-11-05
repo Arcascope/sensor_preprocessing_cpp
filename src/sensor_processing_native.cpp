@@ -240,7 +240,7 @@ public:
         SpectrogramResult result;
         result.freqs.resize(n_freqs);
         result.times.resize(n_segments);
-        result.Sxx.assign(n_freqs, std::vector<double>(n_segments, 0.0));
+        result.Sxx.assign(n_segments, std::vector<double>(n_freqs, 0.0));
 
         // Frequencies based on nperseg
         for (int k = 0; k < n_freqs; ++k)
@@ -281,7 +281,7 @@ public:
             {
                 double real = fft_result[k].real();
                 double imag = fft_result[k].imag();
-                result.Sxx[k][seg] = std::sqrt(real * real + imag * imag) * scale_factor;
+                result.Sxx[seg][k] = std::sqrt(real * real + imag * imag) * scale_factor;
             }
 
             result.times[seg] = (start + nperseg / 2.0) / fs; // center time in sec
