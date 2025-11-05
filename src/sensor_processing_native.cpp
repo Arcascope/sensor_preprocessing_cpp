@@ -1055,7 +1055,6 @@ void free_motion_features_cpp(MotionFeaturesResult *ptr)
     delete ptr;
 }
 
-
 // --- pybind11 bindings (moved here so all implementations are in one TU) ---
 
 #ifdef PYTHON
@@ -1063,7 +1062,6 @@ void free_motion_features_cpp(MotionFeaturesResult *ptr)
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include <pybind11/complex.h>
-
 
 namespace py = pybind11;
 
@@ -1386,24 +1384,36 @@ PYBIND11_MODULE(senpy, m)
     // Main processing functions
     m.def("resample_accelerometer", &resampleAccelerometer_wrapper,
           "Resample accelerometer data to target sampling frequency",
-          py::arg("timestamps"), py::arg("x"), py::arg("y"), py::arg("z"),
+          py::arg("timestamps"),
+          py::arg("x"),
+          py::arg("y"),
+          py::arg("z"),
           py::arg("targetFs"));
 
     m.def("compute_jerk", &computeJerk_wrapper,
           "Compute jerk (derivative of acceleration) from accelerometer data",
-          py::arg("timestamps"), py::arg("x"), py::arg("y"), py::arg("z"));
+          py::arg("timestamps"),
+          py::arg("x"),
+          py::arg("y"),
+          py::arg("z"));
 
     m.def("compute_magnitude", &computeMagnitude_wrapper,
           "Compute magnitude from x, y, z components",
-          py::arg("x"), py::arg("y"), py::arg("z"));
+          py::arg("x"),
+          py::arg("y"),
+          py::arg("z"));
 
     m.def("compute_spectrogram", &computeSpectrogram_wrapper,
           "Compute spectrogram using FFT-based STFT",
-          py::arg("signal"), py::arg("fs"), py::arg("nperseg"), py::arg("noverlap"));
+          py::arg("signal"),
+          py::arg("fs"),
+          py::arg("nperseg"),
+          py::arg("noverlap"));
 
     m.def("compute_motion_features", &computeMotionFeatures_wrapper,
           "Extract breathing rate, heart rate, and motion features from jerk signal",
-          py::arg("jerkSignal"), py::arg("fs"),
+          py::arg("jerkSignal"),
+          py::arg("fs"),
           py::arg("windowSize") = 1500,
           py::arg("overlap") = 750,
           py::arg("brMinHz") = 0.15,
@@ -1426,15 +1436,19 @@ PYBIND11_MODULE(senpy, m)
 
     m.def("gaussian_filter_1d", &gaussianFilter1D_wrapper,
           "Apply 1D Gaussian filter to data",
-          py::arg("data"), py::arg("sigma"), py::arg("truncate") = 4.0);
+          py::arg("data"),
+          py::arg("sigma"),
+          py::arg("truncate") = 4.0);
 
     m.def("find_peaks", &findPeaks_wrapper,
           "Find peaks in signal with prominence threshold",
-          py::arg("signal"), py::arg("prominence_threshold"));
+          py::arg("signal"),
+          py::arg("prominence_threshold"));
 
     m.def("rolling_std", &rollingStd_wrapper,
           "Compute rolling standard deviation",
-          py::arg("data"), py::arg("window_minutes"),
+          py::arg("data"),
+          py::arg("window_minutes"),
           py::arg("seconds_per_window") = 30.0);
 
     m.def("next_power_of_2", [](int n)
