@@ -47,7 +47,13 @@ class AccelerometerData:
 
 
 class SpectrogramResult:
-    """Container for spectrogram computation results."""
+    """Container for spectrogram computation results.
+
+    Attributes:
+        freqs: Array of frequency bins in Hz
+        times: Array of time bins in seconds
+        Sxx:  (time, frequency) array of power spectral density
+    """
 
     def __init__(
         self,
