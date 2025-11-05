@@ -16,21 +16,27 @@ include_directories(${CPP_DIR})
 # Find pybind11
 find_package(pybind11 REQUIRED)
 
-# Create the Python module
-pybind11_add_module(senpy 
-    sensor_processing_native.cpp
+# Create the Python module with the new name
+pybind11_add_module(_core 
+    ${CPP_DIR}/sensor_processing_native.cpp
 )
 
+# Change the output name to match what setup.py expects
+set_target_properties(_core PROPERTIES OUTPUT_NAME "_core")
+
 # expose include directory to the target
-target_include_directories(senpy PRIVATE ${CPP_DIR})
+target_include_directories(_core PRIVATE ${CPP_DIR})
 
 # Link against necessary libraries
-target_link_libraries(senpy PRIVATE)
+target_link_libraries(_core PRIVATE)
 
 # Set RPATH for the module
-set_target_properties(senpy PROPERTIES
+set_target_properties(_core PROPERTIES
     INSTALL_RPATH_USE_LINK_PATH TRUE
 )
 
-# Installation
-install(TARGETS senpy LIBRARY DESTINATION .)
+# Installation - install into the senpy package directory
+install(TARGETS _core 
+    LIBRARY DESTINATION senpy
+    RUNTIME DESTINATION senpy
+)

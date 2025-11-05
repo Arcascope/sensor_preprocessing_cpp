@@ -1,4 +1,4 @@
-from setuptools import setup, Extension
+from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
 import sys
 import setuptools
@@ -18,11 +18,6 @@ CPP_DIR = os.path.abspath(os.path.join(ROOT_DIR, '..', 'src'))
 # explicit binding file in this directory
 PROCESSING_SRC = os.path.join(CPP_DIR, 'sensor_processing_native.cpp')
 
-# collect cpp sources from ../cpp (or list specific files)
-cpp_files = glob.glob(os.path.join(CPP_DIR, '*.cpp'))
-# If you only want specific files, replace above with e.g.:
-# cpp_files = [os.path.join(CPP_DIR, 'sensor_processing.cpp')]
-
 # ensure we compile only the processing TU which now contains the pybind11 module
 sources = [PROCESSING_SRC]
 print(f"Using processing source: {PROCESSING_SRC}")
@@ -38,7 +33,7 @@ except Exception:
 
 ext_modules = [
     Extension(
-        'senpy',
+        'senpy._core',  # Full module path - creates senpy/_core.so
         sources=sources,
         include_dirs=include_dirs,
         language='c++',
@@ -53,6 +48,9 @@ setup(
     description='Fast sensor processing with FFT-based signal analysis',
     long_description='',
     ext_modules=ext_modules,
+    packages=['senpy'],  # Define senpy as a package
+    package_dir={'senpy': '.'},  # The senpy package is in the current directory
+    py_modules=['senpy', 'senpy.api', "senpy._core"],
     install_requires=['pybind11>=2.6.0', 'numpy>=1.19.0'],
     setup_requires=['pybind11>=2.6.0'],
     cmdclass={'build_ext': build_ext},

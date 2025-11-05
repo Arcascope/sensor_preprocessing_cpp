@@ -1377,7 +1377,7 @@ py::array_t<double> rollingStd_wrapper(
     return out_std;
 }
 
-PYBIND11_MODULE(senpy, m)
+PYBIND11_MODULE(_core, m)
 {
     m.doc() = "Sensor processing module with FFT-based signal analysis";
 
