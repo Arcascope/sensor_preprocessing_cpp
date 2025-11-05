@@ -48,7 +48,7 @@ ext_modules = [
 
 setup(
     name='senpy',
-    version='0.1.0',
+    version='0.2.0',
     author='Eric Canton and Franco Tavella',
     description='Fast sensor processing with FFT-based signal analysis',
     long_description='',
