@@ -295,15 +295,16 @@ public:
         double prominence_threshold,
         double scaling_factor = 60.0f)
     {
-        int n_times = Sxx[0].size();
+        int n_times = Sxx.size();
+        int n_freqs = Sxx[0].size();
         std::vector<double> peaks(n_times);
 
         for (int t = 0; t < n_times; ++t)
         {
-            std::vector<double> Sxx_column(Sxx.size());
-            for (size_t f = 0; f < Sxx.size(); ++f)
+            std::vector<double> Sxx_column(n_freqs);
+            for (size_t f = 0; f < n_freqs; ++f)
             {
-                Sxx_column[f] = Sxx[f][t];
+                Sxx_column[f] = Sxx[t][f];
             }
             auto peak_indices = findPeaks(Sxx_column, prominence_threshold);
             int best_idx = 0;
@@ -361,7 +362,8 @@ public:
         double br_max_change_per_sec = 7.5,
         double time_resolution = 30.0)
     {
-        int n_times = Sxx[0].size();
+        int n_times = Sxx.size();
+        int n_freqs = Sxx[0].size();
         double sampling_rate = 1.0 / time_resolution;
 
         // Find frequency indices for breathing and heart rate ranges
@@ -487,12 +489,17 @@ public:
         int end_idx)
     {
         // Extract spectrogram section
-        std::vector<std::vector<double>> Sxx_section(end_idx - start_idx + 1);
+        int n_times = Sxx.size();
+        std::vector<std::vector<double>> Sxx_section(
+            n_times, 
+            std::vector<<double>>(end_idx - start_idx + 1));
         std::vector<double> f_section;
 
         for (int f = start_idx; f <= end_idx; ++f)
         {
-            Sxx_section[f - start_idx] = Sxx[f];
+            for (int t = 0; t < n_times; t++) {
+                Sxx_section[t][f - start_idx] = Sxx[t][f];
+            }
             f_section.push_back(frequencies[f]);
         }
 
@@ -507,9 +514,11 @@ public:
         const std::vector<std::vector<double>> &Sxx,
         double epsilon = 1e-12)
     {
-        int n_freqs = Sxx.size();
-        int n_times = Sxx[0].size();
-        std::vector<std::vector<double>> rescaled(n_freqs, std::vector<double>(n_times));
+        int n_times = Sxx.size();
+        int n_freqs = Sxx[0].size();
+        std::vector<std::vector<double>> rescaled(
+            n_times,
+            std::vector<double>(n_freqs));
 
         // Find max value for each time bin
         for (int t = 0; t < n_times; ++t)
@@ -517,13 +526,13 @@ public:
             double max_val = epsilon;
             for (int f = 0; f < n_freqs; ++f)
             {
-                max_val = std::max(max_val, Sxx[f][t]);
+                max_val = std::max(max_val, Sxx[t][f]);
             }
 
             // Normalize by max value
             for (int f = 0; f < n_freqs; ++f)
             {
-                rescaled[f][t] = Sxx[f][t] / max_val;
+                rescaled[t][f] = Sxx[t][f] / max_val;
             }
         }
 
