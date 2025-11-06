@@ -6,3 +6,4 @@ __pycache__/*
 *.pyo
 *.pyd
 *.egg-info
+senpy/_core.*
