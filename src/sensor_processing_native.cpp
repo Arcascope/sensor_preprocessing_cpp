@@ -18,7 +18,7 @@ struct SpectrogramResult
 {
     std::vector<double> freqs;            // Hz
     std::vector<double> times;            // Relative time in seconds
-    std::vector<std::vector<double>> Sxx; // [freqs x times]
+    std::vector<std::vector<double>> Sxx; // [times x frequencies]
 };
 
 struct MotionFeaturesResult
@@ -724,15 +724,15 @@ public:
     // Helper function to compute frequency sum
     static std::vector<double> computeFrequencySum(const std::vector<std::vector<double>> &Sxx)
     {
-        int n_times = Sxx[0].size();
-        int n_freqs = Sxx.size();
+        int n_times = Sxx.size();
+        int n_freqs = Sxx[0].size();
         std::vector<double> freq_sum(n_times, 0.0);
 
         for (int t = 0; t < n_times; ++t)
         {
             for (int f = 0; f < n_freqs; ++f)
             {
-                freq_sum[t] += Sxx[f][t];
+                freq_sum[t] += Sxx[t][f];
             }
         }
 
@@ -1300,6 +1300,41 @@ py::dict computeSpectrogram_wrapper(
     return result_dict;
 }
 
+py::array_t<double> computeShortTimeFT_wrapper(
+    py::array_t<double> signal,
+    double fs,
+    int nperseg,
+    int noverlap)
+{
+    auto sig_buf = signal.request();
+    std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
+                                   static_cast<double *>(sig_buf.ptr) + sig_buf.size);
+
+    auto result = SensorProcessor::computeShortTimeFT(signal_vec, fs, nperseg, noverlap);
+
+    // Result shape: (n_times, n_frequencies, 2)
+    size_t n_times = result.size();
+    size_t n_freqs = result[0].size();
+
+    // Create 3D NumPy array
+    py::array_t<double> output({n_times, n_freqs, (size_t)2});
+    auto output_buf = output.request();
+    double *output_ptr = static_cast<double *>(output_buf.ptr);
+
+    // Copy data: output[t, f, 0] = real, output[t, f, 1] = imag
+    for (size_t t = 0; t < n_times; ++t)
+    {
+        for (size_t f = 0; f < n_freqs; ++f)
+        {
+            size_t idx = (t * n_freqs + f) * 2;
+            output_ptr[idx] = result[t][f][0];     // real
+            output_ptr[idx + 1] = result[t][f][1]; // imag
+        }
+    }
+
+    return output;
+}
+
 py::dict computeMotionFeatures_wrapper(
     py::array_t<double> jerkSignal,
     double fs,
@@ -1469,6 +1504,13 @@ PYBIND11_MODULE(_core, m)
 
     m.def("compute_spectrogram", &computeSpectrogram_wrapper,
           "Compute spectrogram using FFT-based STFT",
+          py::arg("signal"),
+          py::arg("fs"),
+          py::arg("nperseg"),
+          py::arg("noverlap"));
+
+    m.def("compute_short_time_ft", &computeShortTimeFT_wrapper,
+          "Compute Short-Time Fourier Transform returning complex values (n_times, n_frequencies, 2)",
           py::arg("signal"),
           py::arg("fs"),
           py::arg("nperseg"),

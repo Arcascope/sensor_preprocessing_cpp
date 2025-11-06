@@ -46,6 +46,26 @@ class AccelerometerData:
         return len(self.timestamps)
 
 
+class JerkData:
+    """Container for jerk data with timestamps."""
+
+    def __init__(
+        self,
+        timestamps: NDArray[np.int64],
+        jerk: NDArray[np.float64],
+    ):
+        self.timestamps = timestamps
+        self.jerk = jerk
+
+    @property
+    def shape(self) -> Tuple[int]:
+        """Number of samples in the data."""
+        return self.timestamps.shape
+
+    def __len__(self) -> int:
+        return len(self.timestamps)
+
+
 class SpectrogramResult:
     """Container for spectrogram computation results.
 
@@ -57,13 +77,83 @@ class SpectrogramResult:
 
     def __init__(
         self,
-        freqs: NDArray[np.float64],
+        frequencies: NDArray[np.float64],
         times: NDArray[np.float64],
         Sxx: NDArray[np.float64],
     ):
-        self.freqs = freqs
+        self.frequencies = frequencies
         self.times = times
         self.Sxx = Sxx
+
+    @property
+    def frequency_resolution(self) -> float:
+        """Frequency resolution in Hz."""
+        return (
+            self.frequencies[1] - self.frequencies[0]
+            if len(self.frequencies) > 1
+            else 0.0
+        )
+
+    @property
+    def time_resolution(self) -> float:
+        """Time resolution in seconds."""
+        return self.times[1] - self.times[0] if len(self.times) > 1 else 0.0
+
+
+class ShortTimeFTResult:
+    """Container for Short-Time Fourier Transform results.
+
+    Attributes:
+        stft: Complex STFT array shaped (n_times, n_frequencies, 2) where
+              [:, :, 0] contains real parts and [:, :, 1] contains imaginary parts
+        freqs: Array of frequency bins in Hz
+        times: Array of time bins in seconds
+    """
+
+    def __init__(
+        self,
+        stft: NDArray[np.float64],
+        frequencies: NDArray[np.float64],
+        times: NDArray[np.float64],
+    ):
+        self.stft = stft
+        self.frequencies = frequencies
+        self.times = times
+
+    @property
+    def real(self) -> NDArray[np.float64]:
+        """Real part of the STFT."""
+        return self.stft[:, :, 0]
+
+    @property
+    def imag(self) -> NDArray[np.float64]:
+        """Imaginary part of the STFT."""
+        return self.stft[:, :, 1]
+
+    @property
+    def complex(self) -> NDArray[np.complex128]:
+        """Complex STFT as a complex array."""
+        return self.stft[:, :, 0] + 1j * self.stft[:, :, 1]
+
+    @property
+    def magnitude(self) -> NDArray[np.float64]:
+        """Magnitude (absolute value) of the STFT."""
+        return np.sqrt(self.stft[:, :, 0] ** 2 + self.stft[:, :, 1] ** 2)
+
+    @property
+    def phase(self) -> NDArray[np.float64]:
+        """Phase angle of the STFT in radians."""
+        return np.arctan2(self.stft[:, :, 1], self.stft[:, :, 0])
+
+    @property
+    def power(self) -> NDArray[np.float64]:
+        """Power spectral density (magnitude squared)."""
+        return self.stft[:, :, 0] ** 2 + self.stft[:, :, 1] ** 2
+
+    @property
+    def shape(self) -> Tuple[int, int, int]:
+        """Shape of the STFT array (n_times, n_frequencies, 2)."""
+        return self.stft.shape
 
     @property
     def frequency_resolution(self) -> float:
@@ -97,6 +187,54 @@ class MotionFeatures:
 
 
 def resample_accelerometer(
+    timestamps: NDArray[np.float64],
+    x: NDArray[np.float64],
+    y: NDArray[np.float64],
+    z: NDArray[np.float64],
+    target_fs: float,
+    ts_unit: str = "s",
+) -> AccelerometerData:
+    """
+    Resample accelerometer data to a target sampling frequency.
+
+    Args:
+        timestamps: Array of timestamps in seconds
+        x: X-axis acceleration values
+        y: Y-axis acceleration values
+        z: Z-axis acceleration values
+        target_fs: Target sampling frequency in Hz
+        second_scalar: Scalar to convert timestamps to microseconds (default: 1.0 for seconds)
+
+    Returns:
+        AccelerometerData: Resampled accelerometer data
+
+    Raises:
+        ValueError: If input arrays have different lengths
+    """
+    print("USING PYTHON API FUNCTION")
+    if not (len(timestamps) == len(x) == len(y) == len(z)):
+        raise ValueError("All input arrays must have the same length")
+
+    conversion_scalar = 1e6
+    if ts_unit == "ms":
+        conversion_scalar = 1e3
+    elif ts_unit == "us":
+        conversion_scalar = 1.0
+
+    # Convert timestamps to microseconds
+    timestamps_us = (timestamps * conversion_scalar).astype(np.int64)
+
+    result = _senpy.resample_accelerometer(timestamps_us, x, y, z, target_fs)
+    return AccelerometerData(
+        # return timestamps to original units
+        timestamps=result["timestamps"] / conversion_scalar,
+        x=result["x"],
+        y=result["y"],
+        z=result["z"],
+    )
+
+
+def resample_accelerometer_microseconds(
     timestamps: NDArray[np.int64],
     x: NDArray[np.float64],
     y: NDArray[np.float64],
@@ -112,6 +250,7 @@ def resample_accelerometer(
         y: Y-axis acceleration values
         z: Z-axis acceleration values
         target_fs: Target sampling frequency in Hz
+        second_scalar: Scalar to convert timestamps to microseconds (default: 1.0 for seconds)
 
     Returns:
         AccelerometerData: Resampled accelerometer data
@@ -130,11 +269,49 @@ def resample_accelerometer(
 
 
 def compute_jerk(
+    timestamps: NDArray[np.float64],
+    x: NDArray[np.float64],
+    y: NDArray[np.float64],
+    z: NDArray[np.float64],
+    ts_unit: str = "s",
+) -> JerkData:
+    """
+    Compute jerk (derivative of acceleration) from accelerometer data.
+
+    Args:
+        timestamps: Array of timestamps in seconds
+        x: X-axis acceleration values
+        y: Y-axis acceleration values
+        z: Z-axis acceleration values
+        ts_unit: Unit of the timestamps ('s' for seconds, 'ms' for milliseconds, 'us' for microseconds)
+    Returns:
+        Tuple of (timestamps, jerk_values)
+    Raises:
+        ValueError: If input arrays have different lengths
+    """
+    if not (len(timestamps) == len(x) == len(y) == len(z)):
+        raise ValueError("All input arrays must have the same length")
+
+    conversion_scalar = 1e6
+    if ts_unit == "ms":
+        conversion_scalar = 1e3
+    elif ts_unit == "us":
+        conversion_scalar = 1.0
+
+    # Convert timestamps to microseconds
+    timestamps_us = (timestamps * conversion_scalar).astype(np.int64)
+
+    result = compute_jerk_microseconds(timestamps_us, x, y, z)
+    result.timestamps /= conversion_scalar
+    return result
+
+
+def compute_jerk_microseconds(
     timestamps: NDArray[np.int64],
     x: NDArray[np.float64],
     y: NDArray[np.float64],
     z: NDArray[np.float64],
-) -> Tuple[NDArray[np.int64], NDArray[np.float64]]:
+) -> JerkData:
     """
     Compute jerk (derivative of acceleration) from accelerometer data.
 
@@ -154,7 +331,7 @@ def compute_jerk(
         raise ValueError("All input arrays must have the same length")
 
     result = _senpy.compute_jerk(timestamps, x, y, z)
-    return result["timestamps"], result["jerk"]
+    return JerkData(timestamps=result["timestamps"], jerk=result["jerk"])
 
 
 def compute_magnitude(
@@ -200,8 +377,59 @@ def compute_spectrogram(
     """
     result = _senpy.compute_spectrogram(signal, fs, nperseg, noverlap)
     return SpectrogramResult(
-        freqs=result["freqs"], times=result["times"], Sxx=result["Sxx"]
+        frequencies=result["freqs"], times=result["times"], Sxx=result["Sxx"]
     )
+
+
+def compute_short_time_ft(
+    signal: NDArray[np.float64], fs: float, nperseg: int, noverlap: int
+) -> ShortTimeFTResult:
+    """
+    Compute Short-Time Fourier Transform returning complex values.
+
+    This function performs STFT analysis and returns the complex Fourier coefficients,
+    allowing access to both magnitude and phase information. Unlike compute_spectrogram,
+    which returns only the power spectral density, this function preserves the full
+    complex representation of the signal in the frequency domain.
+
+    Args:
+        signal: Input signal array
+        fs: Sampling frequency in Hz
+        nperseg: Length of each segment (window size)
+        noverlap: Number of points to overlap between segments
+
+    Returns:
+        ShortTimeFTResult: Container with STFT array shaped (n_times, n_frequencies, 2)
+            where the last dimension contains [real, imaginary] parts. Also includes
+            frequency and time bin arrays.
+
+    Note:
+        - Uses Hann window and constant detrending (mean removal)
+        - Only returns positive frequencies (0 to Nyquist)
+        - Access magnitude via result.magnitude, phase via result.phase
+        - Access complex array via result.complex for numpy operations
+
+    Example:
+        >>> result = compute_short_time_ft(signal, fs=50.0, nperseg=256, noverlap=128)
+        >>> magnitude = result.magnitude  # Time-frequency magnitude
+        >>> phase = result.phase          # Time-frequency phase
+        >>> complex_stft = result.complex # Full complex representation
+        >>> print(result.shape)           # (n_times, n_frequencies, 2)
+    """
+    stft_array = _senpy.compute_short_time_ft(signal, fs, nperseg, noverlap)
+
+    # Compute frequency and time arrays (same as in spectrogram)
+    n_times, n_freqs = stft_array.shape[0], stft_array.shape[1]
+    nfft = nperseg
+    step = nperseg - noverlap
+
+    # Generate frequency bins
+    freqs = np.fft.rfftfreq(nfft, 1.0 / fs)
+
+    # Generate time bins (center of each window)
+    times = np.arange(n_times) * step / fs + (nperseg / 2.0) / fs
+
+    return ShortTimeFTResult(stft=stft_array, freqs=freqs, times=times)
 
 
 def compute_motion_features(
@@ -266,7 +494,7 @@ def compute_motion_features(
     )
 
     spectrogram = SpectrogramResult(
-        freqs=result["spectrogram"]["freqs"],
+        frequencies=result["spectrogram"]["freqs"],
         times=result["spectrogram"]["times"],
         Sxx=result["spectrogram"]["Sxx"],
     )
@@ -416,11 +644,13 @@ __version__ = "1.0.0"
 __all__ = [
     "AccelerometerData",
     "SpectrogramResult",
+    "ShortTimeFTResult",
     "MotionFeatures",
     "resample_accelerometer",
     "compute_jerk",
     "compute_magnitude",
     "compute_spectrogram",
+    "compute_short_time_ft",
     "compute_motion_features",
     "hann_window",
     "gaussian_filter_1d",

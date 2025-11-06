@@ -18,10 +18,7 @@ print(f"Resampled x shape: {resampled.x.shape}")
 
 # Example 2: Compute jerk
 time, jerk = sp.compute_jerk(
-    resampled.timestamps, 
-    resampled.x, 
-    resampled.y, 
-    resampled.z
+    resampled.timestamps, resampled.x, resampled.y, resampled.z
 )
 print(f"\nJerk signal shape: {jerk.shape}")
 print(f"Jerk mean: {jerk.mean():.6f}")
@@ -37,10 +34,10 @@ nperseg = 256  # Window size
 noverlap = 128  # Overlap
 
 spec = sp.compute_spectrogram(jerk, fs, nperseg, noverlap)
-print(f"\nSpectrogram frequencies: {spec.freqs.shape}")
+print(f"\nSpectrogram frequencies: {spec.frequencies.shape}")
 print(f"Spectrogram times: {spec.times.shape}")
 print(f"Spectrogram Sxx: {spec.Sxx.shape}")
-print(f"Frequency range: {spec.freqs[0]:.2f} - {spec.freqs[-1]:.2f} Hz")
+print(f"Frequency range: {spec.frequencies[0]:.2f} - {spec.frequencies[-1]:.2f} Hz")
 
 # Example 5: Compute motion features
 # For this example, let's create a longer signal
@@ -50,7 +47,7 @@ features = sp.compute_motion_features(
     long_jerk,
     fs=50.0,
     window_size=1500,  # 30 seconds at 50 Hz
-    overlap=750,       # 50% overlap
+    overlap=750,  # 50% overlap
 )
 
 print(f"\nMotion Features:")
