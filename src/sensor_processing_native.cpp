@@ -492,7 +492,7 @@ public:
         int n_times = Sxx.size();
         std::vector<std::vector<double>> Sxx_section(
             n_times, 
-            std::vector<<double>>(end_idx - start_idx + 1));
+            std::vector<double>(end_idx - start_idx + 1));
         std::vector<double> f_section;
 
         for (int f = start_idx; f <= end_idx; ++f)
