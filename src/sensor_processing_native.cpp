@@ -289,6 +289,61 @@ public:
         return result;
     }
 
+    // Compute Short-Time Fourier Transform returning complex values
+    // Returns shape: (n_times, n_frequencies, 2) where last dimension is [real, imag]
+    static std::vector<std::vector<std::vector<double>>> computeShortTimeFT(
+        const std::vector<double> &signal,
+        double fs,
+        int nperseg,
+        int noverlap)
+    {
+        int step = nperseg - noverlap;
+        int n_segments = (signal.size() - nperseg) / step + 1;
+        int nfft = nperseg;
+        int n_freqs = nfft / 2 + 1; // Frequency bins
+
+        // Result shape: (n_times, n_frequencies, 2)
+        std::vector<std::vector<std::vector<double>>> result(
+            n_segments,
+            std::vector<std::vector<double>>(n_freqs, std::vector<double>(2, 0.0)));
+
+        // Pre-compute window (avoid recomputation)
+        auto window = hannWindow(nperseg);
+
+        // Pre-allocate segment buffer (reuse memory)
+        std::vector<double> segment(nperseg);
+
+        // Loop over segments
+        for (int seg = 0; seg < n_segments; ++seg)
+        {
+            int start = seg * step;
+
+            double segment_sum = 0.0;
+            for (int i = 0; i < nperseg; ++i)
+            {
+                segment[i] = signal[start + i];
+                segment_sum += segment[i];
+            }
+
+            // Detrend: subtract mean
+            double segment_mean = segment_sum / nperseg;
+            for (int i = 0; i < nperseg; ++i)
+            {
+                segment[i] = (segment[i] - segment_mean) * window[i]; // Detrend and window in one step
+            }
+
+            auto fft_result = calculateFFT(segment, nperseg);
+
+            // Store real and imaginary parts
+            for (int k = 0; k < n_freqs; ++k)
+            {
+                result[seg][k][0] = fft_result[k].real();
+                result[seg][k][1] = fft_result[k].imag();
+            }
+        }
+        return result;
+    }
+
     static std::vector<double> findSpectrogramPeaks(
         const std::vector<std::vector<double>> &Sxx,
         const std::vector<double> &frequencies,
