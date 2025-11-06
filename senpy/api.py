@@ -27,23 +27,28 @@ class AccelerometerData:
 
     def __init__(
         self,
-        timestamps: NDArray[np.int64],
+        timestamps_us: NDArray[np.int64],
         x: NDArray[np.float64],
         y: NDArray[np.float64],
         z: NDArray[np.float64],
     ):
-        self.timestamps = timestamps
+        self.timestamps_us = timestamps_us
         self.x = x
         self.y = y
         self.z = z
 
     @property
+    def timestamps_s(self) -> NDArray[np.float64]:
+        """Return timestamps in seconds."""
+        return self.timestamps_us.astype(np.float64) / 1e6
+
+    @property
     def shape(self) -> Tuple[int]:
         """Number of samples in the data."""
-        return self.timestamps.shape
+        return self.timestamps_us.shape
 
     def __len__(self) -> int:
-        return len(self.timestamps)
+        return len(self.timestamps_us)
 
 
 class JerkData:
@@ -51,19 +56,24 @@ class JerkData:
 
     def __init__(
         self,
-        timestamps: NDArray[np.int64],
+        timestamps_us: NDArray[np.int64],
         jerk: NDArray[np.float64],
     ):
-        self.timestamps = timestamps
+        self.timestamps_us = timestamps_us
         self.jerk = jerk
+
+    @property
+    def timestamps_s(self) -> NDArray[np.float64]:
+        """Return timestamps in seconds."""
+        return self.timestamps_us.astype(np.float64) / 1e6
 
     @property
     def shape(self) -> Tuple[int]:
         """Number of samples in the data."""
-        return self.timestamps.shape
+        return self.timestamps_us.shape
 
     def __len__(self) -> int:
-        return len(self.timestamps)
+        return len(self.timestamps_us)
 
 
 class SpectrogramResult:
@@ -226,8 +236,7 @@ def resample_accelerometer(
 
     result = _senpy.resample_accelerometer(timestamps_us, x, y, z, target_fs)
     return AccelerometerData(
-        # return timestamps to original units
-        timestamps=result["timestamps"] / conversion_scalar,
+        timestamps_us=result["timestamps"],
         x=result["x"],
         y=result["y"],
         z=result["z"],
@@ -264,7 +273,7 @@ def resample_accelerometer_microseconds(
 
     result = _senpy.resample_accelerometer(timestamps, x, y, z, target_fs)
     return AccelerometerData(
-        timestamps=result["timestamps"], x=result["x"], y=result["y"], z=result["z"]
+        timestamps_us=result["timestamps"], x=result["x"], y=result["y"], z=result["z"]
     )
 
 
@@ -302,7 +311,6 @@ def compute_jerk(
     timestamps_us = (timestamps * conversion_scalar).astype(np.int64)
 
     result = compute_jerk_microseconds(timestamps_us, x, y, z)
-    result.timestamps /= conversion_scalar
     return result
 
 
@@ -331,7 +339,7 @@ def compute_jerk_microseconds(
         raise ValueError("All input arrays must have the same length")
 
     result = _senpy.compute_jerk(timestamps, x, y, z)
-    return JerkData(timestamps=result["timestamps"], jerk=result["jerk"])
+    return JerkData(timestamps_us=result["timestamps"], jerk=result["jerk"])
 
 
 def compute_magnitude(

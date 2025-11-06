@@ -13,12 +13,12 @@ z = np.ones(n_samples) + np.random.randn(n_samples) * 0.1
 target_fs = 50.0
 resampled = sp.resample_accelerometer(timestamps, x, y, z, target_fs)
 print(f"Original samples: {len(timestamps)}")
-print(f"Resampled samples: {len(resampled.timestamps)}")
+print(f"Resampled samples: {len(resampled._timestamps_us)}")
 print(f"Resampled x shape: {resampled.x.shape}")
 
 # Example 2: Compute jerk
 time, jerk = sp.compute_jerk(
-    resampled.timestamps, resampled.x, resampled.y, resampled.z
+    resampled._timestamps_us, resampled.x, resampled.y, resampled.z
 )
 print(f"\nJerk signal shape: {jerk.shape}")
 print(f"Jerk mean: {jerk.mean():.6f}")
