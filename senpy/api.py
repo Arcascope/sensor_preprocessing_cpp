@@ -49,6 +49,27 @@ class AccelerometerData:
 
     def __len__(self) -> int:
         return len(self.timestamps_us)
+    
+    def to_xyz_array(self) -> NDArray[np.float64]:
+        """Return accelerometer data as an (N, 3) array."""
+        return np.column_stack((self.x, self.y, self.z))
+    
+    def to_txyz_array(self) -> NDArray[Union[np.int64, np.float64]]:
+        """Return accelerometer data as an (N, 4) array with timestamps."""
+        return np.column_stack((self.timestamps_us, self.x, self.y, self.z))
+    
+    def to_pandas(self) -> "pd.DataFrame":
+        """Return accelerometer data as a pandas DataFrame."""
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "timestamp_us": self.timestamps_us,
+                "x": self.x,
+                "y": self.y,
+                "z": self.z,
+            }
+        )
 
 
 class JerkData:
@@ -652,6 +673,7 @@ __version__ = "1.0.0"
 __all__ = [
     "AccelerometerData",
     "SpectrogramResult",
+    "JerkData",
     "ShortTimeFTResult",
     "MotionFeatures",
     "resample_accelerometer",
