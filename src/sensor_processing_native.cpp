@@ -546,13 +546,14 @@ public:
         // Extract spectrogram section
         int n_times = Sxx.size();
         std::vector<std::vector<double>> Sxx_section(
-            n_times, 
+            n_times,
             std::vector<double>(end_idx - start_idx + 1));
         std::vector<double> f_section;
 
         for (int f = start_idx; f <= end_idx; ++f)
         {
-            for (int t = 0; t < n_times; t++) {
+            for (int t = 0; t < n_times; t++)
+            {
                 Sxx_section[t][f - start_idx] = Sxx[t][f];
             }
             f_section.push_back(frequencies[f]);
@@ -1441,6 +1442,53 @@ py::array_t<double> gaussianFilter1D_wrapper(
     return out_filtered;
 }
 
+py::array_t<int> findSpectrogramPeaks_wrapper(
+    py::array_t<double> Sxx,
+    py::array_t<double> frequencies,
+    double prominence_threshold,
+    double scaling_factor = 60.0)
+{
+    auto Sxx_buf = Sxx.request();
+    auto freq_buf = frequencies.request();
+
+    if (Sxx_buf.ndim != 2)
+    {
+        throw std::runtime_error("Sxx must be a 2D array");
+    }
+
+    size_t n_times = Sxx_buf.shape[0];
+    size_t n_freqs = Sxx_buf.shape[1];
+
+    if (freq_buf.size != n_freqs)
+    {
+        throw std::runtime_error("Frequencies array size must match Sxx frequency dimension");
+    }
+
+    // Convert 2D NumPy array to std::vector<std::vector<double>>
+    std::vector<std::vector<double>> Sxx_vec(n_times, std::vector<double>(n_freqs));
+    double *Sxx_ptr = static_cast<double *>(Sxx_buf.ptr);
+
+    for (size_t t = 0; t < n_times; ++t)
+    {
+        for (size_t f = 0; f < n_freqs; ++f)
+        {
+            Sxx_vec[t][f] = Sxx_ptr[t * n_freqs + f];
+        }
+    }
+
+    // Convert frequencies
+    std::vector<double> freq_vec(static_cast<double *>(freq_buf.ptr),
+                                 static_cast<double *>(freq_buf.ptr) + freq_buf.size);
+
+    auto peaks = SensorProcessor::findSpectrogramPeaks(Sxx_vec, freq_vec, prominence_threshold, scaling_factor);
+
+    py::array_t<double> out_peaks(peaks.size());
+    std::copy(peaks.begin(), peaks.end(),
+              static_cast<double *>(out_peaks.request().ptr));
+
+    return out_peaks;
+}
+
 py::array_t<int> findPeaks_wrapper(
     py::array_t<double> signal,
     double prominence_threshold)
@@ -1550,6 +1598,13 @@ PYBIND11_MODULE(_core, m)
           "Find peaks in signal with prominence threshold",
           py::arg("signal"),
           py::arg("prominence_threshold"));
+
+    m.def("find_spectrogram_peaks", &findSpectrogramPeaks_wrapper,
+          "Find peaks in spectrogram with prominence threshold and scaling",
+          py::arg("Sxx"),
+          py::arg("frequencies"),
+          py::arg("prominence_threshold"),
+          py::arg("scaling_factor") = 60.0);
 
     m.def("rolling_std", &rollingStd_wrapper,
           "Compute rolling standard deviation",

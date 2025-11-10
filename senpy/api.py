@@ -129,6 +129,33 @@ class SpectrogramResult:
     def time_resolution(self) -> float:
         """Time resolution in seconds."""
         return self.times[1] - self.times[0] if len(self.times) > 1 else 0.0
+    
+    def find_peaks(
+        self,
+        prominence_threshold: float,
+        freq_min: Optional[float] = None,
+        freq_max: Optional[float] = None,
+        scaling_factor: float = 60.0,
+    ) -> List[NDArray[np.int32]]:
+        """Find peaks in each time slice of the spectrogram.
+
+        Args:
+            prominence_threshold: Minimum prominence required for peak detection
+
+        Returns:
+            List of arrays, each containing peak indices for corresponding time slice
+        """
+        freq_search = self.frequencies
+        if freq_min is not None:
+            freq_search &= freq_search >= freq_min
+        if freq_max is not None:
+            freq_search &= freq_search <= freq_max
+        return find_spectrogram_peaks(
+            Sxx=self.Sxx,
+            prominence_threshold=prominence_threshold,
+            frequencies=self.frequencies,
+            scaling_factor=scaling_factor
+        )
 
 
 class ShortTimeFTResult:
@@ -568,6 +595,28 @@ def gaussian_filter_1d(
     """
     return _senpy.gaussian_filter_1d(data, sigma, truncate)
 
+def find_spectrogram_peaks(
+    Sxx: NDArray[np.float64],
+    prominence_threshold: float,
+    frequencies: NDArray[np.float64],
+    scaling_factor: float = 60.0
+) -> List[NDArray[np.int32]]:
+    """
+    Find peaks in each time slice of spectrogram with prominence threshold.
+
+    Args:
+        Sxx: Spectrogram power spectral density array (time, frequency)
+        prominence_threshold: Minimum prominence required for peak detection
+
+    Returns:
+        List of arrays, each containing peak indices for corresponding time slice
+    """
+    return _senpy.find_spectrogram_peaks(
+        Sxx=Sxx,
+        prominence_threshold=prominence_threshold,
+        frequencies=frequencies,
+        scaling_factor=scaling_factor)
+
 
 def find_peaks(
     signal: NDArray[np.float64], prominence_threshold: float
@@ -646,26 +695,19 @@ def compute_percentile(data: NDArray[np.float64], percentile: float) -> float:
 class FrequencyRanges:
     """Common frequency ranges for physiological signals."""
 
-    # Breathing rate ranges (Hz)
-    BR_RESTING_MIN = 0.15  # 9 BPM
-    BR_RESTING_MAX = 0.417  # 25 BPM
-    BR_EXERCISE_MIN = 0.25  # 15 BPM
-    BR_EXERCISE_MAX = 0.833  # 50 BPM
+    # Breathing rate ranges (Hz, N/60 = Breaths/Min)
+    BR_RESTING_MIN = 9/60
+    BR_RESTING_MAX = 25/60
 
-    # Heart rate ranges (Hz)
-    HR_RESTING_MIN = 0.83  # 50 BPM
-    HR_RESTING_MAX = 1.67  # 100 BPM
-    HR_EXERCISE_MIN = 0.5  # 30 BPM
-    HR_EXERCISE_MAX = 3.33  # 200 BPM
+    # Heart rate ranges (Hz, N/60 = BPM)
+    HR_RESTING_MIN = 30/60
+    HR_RESTING_MAX = 120/60
 
 
 class SamplingRates:
     """Common sampling rates for sensor data."""
-
     ACCELEROMETER_STANDARD = 50.0  # Hz
     ACCELEROMETER_HIGH = 100.0  # Hz
-    PPG_STANDARD = 25.0  # Hz
-    ECG_STANDARD = 250.0  # Hz
 
 
 # Version info
@@ -685,6 +727,7 @@ __all__ = [
     "hann_window",
     "gaussian_filter_1d",
     "find_peaks",
+    "find_spectrogram_peaks",
     "rolling_std",
     "next_power_of_2",
     "compute_median",
