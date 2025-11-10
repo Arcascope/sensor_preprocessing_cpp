@@ -1442,7 +1442,7 @@ py::array_t<double> gaussianFilter1D_wrapper(
     return out_filtered;
 }
 
-py::array_t<int> findSpectrogramPeaks_wrapper(
+py::array_t<double> findSpectrogramPeaks_wrapper(
     py::array_t<double> Sxx,
     py::array_t<double> frequencies,
     double prominence_threshold,

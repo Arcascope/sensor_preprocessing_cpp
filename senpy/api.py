@@ -148,9 +148,9 @@ class SpectrogramResult:
         """
         freq_search = np.ones_like(self.frequencies, dtype=bool)
         if freq_min is not None:
-            freq_search &= freq_search >= freq_min
+            freq_search &= self.frequencies >= freq_min
         if freq_max is not None:
-            freq_search &= freq_search <= freq_max
+            freq_search &= self.frequencies <= freq_max
         
         if relative_prominence:
             # Scale prominence threshold based on max and min values in the spectrogram
@@ -158,13 +158,16 @@ class SpectrogramResult:
             min_val = np.min(self.Sxx[:, freq_search])
             prominence_threshold = prominence_threshold * (max_val - min_val)
 
-        return find_spectrogram_peaks(
-            Sxx=self.Sxx,
+        search_frequencies = self.frequencies[freq_search]
+        search_spectrogram = self.Sxx[:, freq_search]
+        peaks = find_spectrogram_peaks(
+            Sxx=search_spectrogram,
             prominence_threshold=prominence_threshold,
-            frequencies=self.frequencies[freq_search],
+            frequencies=search_frequencies,
             scaling_factor=scaling_factor
         )
 
+        return peaks
 
 class ShortTimeFTResult:
     """Container for Short-Time Fourier Transform results.
