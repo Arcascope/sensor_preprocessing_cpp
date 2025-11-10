@@ -133,10 +133,11 @@ class SpectrogramResult:
     def find_peaks(
         self,
         prominence_threshold: float,
+        relative_prominence: bool = True,
         freq_min: Optional[float] = None,
         freq_max: Optional[float] = None,
         scaling_factor: float = 60.0,
-    ) -> List[NDArray[np.int32]]:
+    ) -> NDArray[np.int32]:
         """Find peaks in each time slice of the spectrogram.
 
         Args:
@@ -145,15 +146,22 @@ class SpectrogramResult:
         Returns:
             List of arrays, each containing peak indices for corresponding time slice
         """
-        freq_search = self.frequencies
+        freq_search = np.ones_like(self.frequencies, dtype=bool)
         if freq_min is not None:
             freq_search &= freq_search >= freq_min
         if freq_max is not None:
             freq_search &= freq_search <= freq_max
+        
+        if relative_prominence:
+            # Scale prominence threshold based on max and min values in the spectrogram
+            max_val = np.max(self.Sxx[:, freq_search])
+            min_val = np.min(self.Sxx[:, freq_search])
+            prominence_threshold = prominence_threshold * (max_val - min_val)
+
         return find_spectrogram_peaks(
             Sxx=self.Sxx,
             prominence_threshold=prominence_threshold,
-            frequencies=self.frequencies,
+            frequencies=self.frequencies[freq_search],
             scaling_factor=scaling_factor
         )
 
@@ -600,7 +608,7 @@ def find_spectrogram_peaks(
     prominence_threshold: float,
     frequencies: NDArray[np.float64],
     scaling_factor: float = 60.0
-) -> List[NDArray[np.int32]]:
+) -> NDArray[np.int32]:
     """
     Find peaks in each time slice of spectrogram with prominence threshold.
 
