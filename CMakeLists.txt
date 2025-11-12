@@ -28,7 +28,6 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 # Add the shared library
 add_library(sensor_processing SHARED
     sensor_processing_native.cpp
-    # sensor_processing.cpp is included via #include
 )
 
 # Set library properties
