@@ -347,32 +347,34 @@ public:
     static std::vector<double> findSpectrogramPeaks(
         const std::vector<std::vector<double>> &Sxx,
         const std::vector<double> &frequencies,
-        double prominence_threshold,
+        double relative_prominence,
         double scaling_factor = 60.0f)
     {
         int n_times = Sxx.size();
         int n_freqs = Sxx[0].size();
         std::vector<double> peaks(n_times);
+        auto sxx_rescaled = rescaleSpectrogram(Sxx);
+        double sxx_min = computeMinMax2D(sxx_rescaled, false);
 
         for (int t = 0; t < n_times; ++t)
         {
-            std::vector<double> Sxx_column(n_freqs);
+            std::vector<double> Sxx_time_slice(n_freqs);
             for (size_t f = 0; f < n_freqs; ++f)
             {
-                Sxx_column[f] = Sxx[t][f];
+                Sxx_time_slice[f] = sxx_rescaled[t][f];
             }
-            auto peak_indices = findPeaks(Sxx_column, prominence_threshold);
+            auto peak_indices = findPeaks(Sxx_time_slice, relative_prominence * (1 - sxx_min));
             int best_idx = 0;
             if (!peak_indices.empty())
             {
                 // Find the peak with maximum power
                 best_idx = peak_indices[0];
-                double max_power = Sxx_column[best_idx];
+                double max_power = Sxx_time_slice[best_idx];
                 for (int idx : peak_indices)
                 {
-                    if (Sxx_column[idx] > max_power)
+                    if (Sxx_time_slice[idx] > max_power)
                     {
-                        max_power = Sxx_column[idx];
+                        max_power = Sxx_time_slice[idx];
                         best_idx = idx;
                     }
                 }
@@ -441,16 +443,18 @@ public:
         // Extract and rescale BR spectrogram section
         auto [p_br, f_br] = extractAndRescaleSpectrogramSection(Sxx, frequencies, br_start, br_end);
 
-        // Calculate prominence thresholds
-        double hr_max = computeMinMax2D(p_hr, true);
-        double hr_min = computeMinMax2D(p_hr, false);
-        double br_max = computeMinMax2D(p_br, true);
-        double br_min = computeMinMax2D(p_br, false);
-        double HR_prominence_threshold = (hr_max - hr_min) * 0.1;
-        double BR_prominence_threshold = (br_max - br_min) * 0.1;
+        // // Calculate prominence thresholds
+        // // max is always 1.0 after extractAndRescale
+        // double hr_max = computeMinMax2D(p_hr, true);
+        // double hr_min = computeMinMax2D(p_hr, false);
+        // double br_max = computeMinMax2D(p_br, true);
+        // double br_min = computeMinMax2D(p_br, false);
+        // double HR_prominence_threshold = (hr_max - hr_min) * 0.1;
+        // double BR_prominence_threshold = (br_max - br_min) * 0.1;
+        double relative_prominence_threshold = 0.1;
 
-        std::vector<double> HR_peaks = findSpectrogramPeaks(p_hr, f_hr, HR_prominence_threshold);
-        std::vector<double> BR_peaks = findSpectrogramPeaks(p_br, f_br, BR_prominence_threshold);
+        std::vector<double> HR_peaks = findSpectrogramPeaks(p_hr, f_hr, relative_prominence_threshold);
+        std::vector<double> BR_peaks = findSpectrogramPeaks(p_br, f_br, relative_prominence_threshold);
 
         // Apply smoothing with rate constraints
         auto HR_smooth = smoothPeaksWithRateConstraint(HR_peaks, hr_max_change_per_sec, sampling_rate);
@@ -570,6 +574,8 @@ public:
         const std::vector<std::vector<double>> &Sxx,
         double epsilon = 1e-12)
     {
+        /// ax_1_max =np.max(Sxx, axis=1)
+        /// Sxx /= ax_1_max
         int n_times = Sxx.size();
         int n_freqs = Sxx[0].size();
         std::vector<std::vector<double>> rescaled(
