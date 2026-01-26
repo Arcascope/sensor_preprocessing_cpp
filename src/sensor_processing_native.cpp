@@ -669,6 +669,25 @@ public:
         return constrained;
     }
 
+    // Helper function to smooth spectrogram peaks with Gaussian filter and rate constraints
+    static std::vector<double> smoothSpectrogramPeaks(
+        const std::vector<double> &peaks,
+        double sampling_rate,
+        double max_change_per_sec = 10.0,
+        double filter_sigma = 2.0)
+    {
+        if (peaks.empty())
+            return peaks;
+
+        // First, apply Gaussian smoothing
+        std::vector<double> smoothed = gaussianFilter1D(peaks, filter_sigma);
+
+        // Then apply rate-of-change constraint
+        std::vector<double> constrained = smoothPeaksWithRateConstraint(smoothed, max_change_per_sec, sampling_rate);
+
+        return constrained;
+    }
+
     // Helper function to apply Gaussian filter (1D smoothing)
     static std::vector<double> gaussianFilter1D(const std::vector<double> &data, double sigma, double truncate = 4.0)
     {
@@ -1530,6 +1549,25 @@ py::array_t<double> rollingStd_wrapper(
     return out_std;
 }
 
+py::array_t<double> smoothSpectrogramPeaks_wrapper(
+    py::array_t<double> peaks,
+    double sampling_rate,
+    double max_change_per_sec = 10.0,
+    double filter_sigma = 2.0)
+{
+    auto peaks_buf = peaks.request();
+    std::vector<double> peaks_vec(static_cast<double *>(peaks_buf.ptr),
+                                  static_cast<double *>(peaks_buf.ptr) + peaks_buf.size);
+
+    auto smoothed = SensorProcessor::smoothSpectrogramPeaks(peaks_vec, sampling_rate, max_change_per_sec, filter_sigma);
+
+    py::array_t<double> out_smoothed(smoothed.size());
+    std::copy(smoothed.begin(), smoothed.end(),
+              static_cast<double *>(out_smoothed.request().ptr));
+
+    return out_smoothed;
+}
+
 PYBIND11_MODULE(_core, m)
 {
     m.doc() = "Sensor processing module with FFT-based signal analysis";
@@ -1617,6 +1655,13 @@ PYBIND11_MODULE(_core, m)
           py::arg("data"),
           py::arg("window_minutes"),
           py::arg("seconds_per_window") = 30.0);
+
+    m.def("smooth_spectrogram_peaks", &smoothSpectrogramPeaks_wrapper,
+          "Smooth spectrogram peaks using Gaussian filter and rate constraints",
+          py::arg("peaks"),
+          py::arg("sampling_rate"),
+          py::arg("max_change_per_sec") = 10.0,
+          py::arg("filter_sigma") = 2.0);
 
     m.def("next_power_of_2", [](int n)
           { return SensorProcessor::nextPowerOf2(n); }, "Find next power of 2 greater than or equal to n", py::arg("n"));

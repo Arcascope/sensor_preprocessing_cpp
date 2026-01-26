@@ -702,6 +702,33 @@ def compute_percentile(data: NDArray[np.float64], percentile: float) -> float:
     return _senpy.compute_percentile(data, percentile)
 
 
+def smooth_spectrogram_peaks(
+    spectrogram_peaks: np.ndarray,
+    sampling_rate: float,
+    max_change_per_sec: float = 10.0,
+    filter_sigma: float = 2.0,
+) -> np.ndarray:
+    """
+    Smooth the spectrogram peaks using a Gaussian filter,
+    then enforce a maximum allowable rate of change per second.
+
+    Parameters:
+        spectrogram_peaks: array of peak values (e.g., heart rate in BPM)
+        sampling_rate: frequency at which spectrogram peaks are sampled (Hz)
+        max_change_per_sec: maximum allowed delta in BPM per second
+        filter_sigma: standard deviation for Gaussian filter
+
+    Returns:
+        np.ndarray: smoothed peak signal
+    """
+    return _senpy.smooth_spectrogram_peaks(
+        spectrogram_peaks,
+        sampling_rate,
+        max_change_per_sec,
+        filter_sigma
+    )
+
+
 # Constants for convenience
 class FrequencyRanges:
     """Common frequency ranges for physiological signals."""
@@ -743,6 +770,7 @@ __all__ = [
     "next_power_of_2",
     "compute_median",
     "compute_percentile",
+    "smooth_spectrogram_peaks",
     "FrequencyRanges",
     "SamplingRates",
 ]
