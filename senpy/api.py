@@ -49,15 +49,15 @@ class AccelerometerData:
 
     def __len__(self) -> int:
         return len(self.timestamps_us)
-    
+
     def to_xyz_array(self) -> NDArray[np.float64]:
         """Return accelerometer data as an (N, 3) array."""
         return np.column_stack((self.x, self.y, self.z))
-    
+
     def to_txyz_array(self) -> NDArray[Union[np.int64, np.float64]]:
         """Return accelerometer data as an (N, 4) array with timestamps."""
         return np.column_stack((self.timestamps_us, self.x, self.y, self.z))
-    
+
     def to_pandas(self) -> "pd.DataFrame":
         """Return accelerometer data as a pandas DataFrame."""
         import pandas as pd
@@ -129,7 +129,7 @@ class SpectrogramResult:
     def time_resolution(self) -> float:
         """Time resolution in seconds."""
         return self.times[1] - self.times[0] if len(self.times) > 1 else 0.0
-    
+
     def find_peaks(
         self,
         prominence_threshold: float,
@@ -151,7 +151,7 @@ class SpectrogramResult:
             freq_search &= self.frequencies >= freq_min
         if freq_max is not None:
             freq_search &= self.frequencies <= freq_max
-        
+
         if relative_prominence:
             # Scale prominence threshold based on max and min values in the spectrogram
             max_val = np.max(self.Sxx[:, freq_search])
@@ -164,10 +164,11 @@ class SpectrogramResult:
             Sxx=search_spectrogram,
             prominence_threshold=prominence_threshold,
             frequencies=search_frequencies,
-            scaling_factor=scaling_factor
+            scaling_factor=scaling_factor,
         )
 
         return peaks
+
 
 class ShortTimeFTResult:
     """Container for Short-Time Fourier Transform results.
@@ -280,7 +281,6 @@ def resample_accelerometer(
     Raises:
         ValueError: If input arrays have different lengths
     """
-    print("USING PYTHON API FUNCTION")
     if not (len(timestamps) == len(x) == len(y) == len(z)):
         raise ValueError("All input arrays must have the same length")
 
@@ -326,7 +326,6 @@ def resample_accelerometer_microseconds(
     Raises:
         ValueError: If input arrays have different lengths
     """
-    print("USING PYTHON API FUNCTION")
     if not (len(timestamps) == len(x) == len(y) == len(z)):
         raise ValueError("All input arrays must have the same length")
 
@@ -606,11 +605,12 @@ def gaussian_filter_1d(
     """
     return _senpy.gaussian_filter_1d(data, sigma, truncate)
 
+
 def find_spectrogram_peaks(
     Sxx: NDArray[np.float64],
     prominence_threshold: float,
     frequencies: NDArray[np.float64],
-    scaling_factor: float = 60.0
+    scaling_factor: float = 60.0,
 ) -> NDArray[np.int32]:
     """
     Find peaks in each time slice of spectrogram with prominence threshold.
@@ -626,7 +626,8 @@ def find_spectrogram_peaks(
         Sxx=Sxx,
         prominence_threshold=prominence_threshold,
         frequencies=frequencies,
-        scaling_factor=scaling_factor)
+        scaling_factor=scaling_factor,
+    )
 
 
 def find_peaks(
@@ -722,10 +723,7 @@ def smooth_spectrogram_peaks(
         np.ndarray: smoothed peak signal
     """
     return _senpy.smooth_spectrogram_peaks(
-        spectrogram_peaks,
-        sampling_rate,
-        max_change_per_sec,
-        filter_sigma
+        spectrogram_peaks, sampling_rate, max_change_per_sec, filter_sigma
     )
 
 
@@ -734,16 +732,17 @@ class FrequencyRanges:
     """Common frequency ranges for physiological signals."""
 
     # Breathing rate ranges (Hz, N/60 = Breaths/Min)
-    BR_RESTING_MIN = 9/60
-    BR_RESTING_MAX = 25/60
+    BR_RESTING_MIN = 9 / 60
+    BR_RESTING_MAX = 25 / 60
 
     # Heart rate ranges (Hz, N/60 = BPM)
-    HR_RESTING_MIN = 30/60
-    HR_RESTING_MAX = 120/60
+    HR_RESTING_MIN = 30 / 60
+    HR_RESTING_MAX = 120 / 60
 
 
 class SamplingRates:
     """Common sampling rates for sensor data."""
+
     ACCELEROMETER_STANDARD = 50.0  # Hz
     ACCELEROMETER_HIGH = 100.0  # Hz
 
