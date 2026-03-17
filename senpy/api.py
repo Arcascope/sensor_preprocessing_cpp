@@ -428,19 +428,20 @@ def _nufft_type1(x_nonuniform: NDArray[np.float64],
 def compute_spectrogram_nufft(
     timestamps: NDArray[np.float64],
     signal: NDArray[np.float64],
-    nperseg: int,
-    noverlap: int,
+    secperseg: float,
+    secoverlap: float,
     ts_unit: str = "s",
-    nfft: Optional[int] = None,
+    target_fs: Optional[float] = None,
 ) -> SpectrogramResult:
     """Compute a spectrogram directly from non-uniformly sampled data
     using the Non-Uniform FFT, bypassing time-domain resampling entirely.
 
     For each STFT window the algorithm:
 
-    1. Selects the non-uniform samples falling within the window.
+    1. Selects the non-uniform samples falling within the window (fixed duration in seconds).
     2. Applies a Hann window evaluated at the true sample times.
     3. Computes the spectrum via type-1 NUFFT using finufft (via C++ backend).
+    4. Interpolates to a common frequency grid (if target_fs is specified).
 
     Because no resampling interpolation is involved, the result is free
     of the spectral artifacts that linear or spline resampling introduce
@@ -449,13 +450,12 @@ def compute_spectrogram_nufft(
     Args:
         timestamps: Sample timestamps (same length as *signal*).
         signal: 1-D signal values (e.g. jerk magnitude).
-        nperseg: Nominal window length **in samples at the median
-                 sampling rate** — used only to determine the window
-                 duration in seconds: ``win_dur = nperseg / median_fs``.
-        noverlap: Nominal overlap in samples (same basis as *nperseg*).
+        secperseg: Window duration in seconds.
+        secoverlap: Overlap duration in seconds.
         ts_unit: Timestamp unit — ``'s'``, ``'ms'``, or ``'us'``.
-        nfft: Number of frequency bins (default: *nperseg*).  Increase
-              for zero-padded spectral resolution.
+        target_fs: If specified, interpolate output to a fixed frequency grid
+                   with this sampling rate. Frequency spacing will be 1/secperseg.
+                   Fmax will be target_fs/2.
 
     Returns:
         SpectrogramResult with *frequencies* (Hz), *times* (s), and
@@ -468,13 +468,13 @@ def compute_spectrogram_nufft(
     conversion = {"s": 1.0, "ms": 1e-3, "us": 1e-6}.get(ts_unit, 1.0)
     t = timestamps.astype(np.float64) * conversion
 
-    # Default nfft
-    if nfft is None:
-        nfft = nperseg
+    # Call C++ backend with optional target_fs for resampling
+    target_fs_val = target_fs if target_fs is not None else 0.0
 
-    # Call C++ backend
     try:
-        result_dict = _senpy.compute_spectrogram_nufft(t, signal.astype(np.float64), nperseg, noverlap, nfft)
+        result_dict = _senpy.compute_spectrogram_nufft(
+            t, signal.astype(np.float64), secperseg, secoverlap, target_fs_val
+        )
         return SpectrogramResult(
             frequencies=result_dict["freqs"],
             times=result_dict["times"],

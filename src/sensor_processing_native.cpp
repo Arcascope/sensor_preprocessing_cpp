@@ -297,12 +297,14 @@ public:
 
     // Compute spectrogram from non-uniformly sampled data using NUFFT
     // Bypasses resampling to avoid spectral artifacts in the 0-10 Hz band
+    // secperseg and secoverlap are in seconds (not samples)
+    // target_fs: if > 0, resample output to fixed freq grid (fmax = target_fs/2, spacing = 1/secperseg)
     static SpectrogramResult computeSpectrogramNUFFT(
         const std::vector<double> &timestamps,
         const std::vector<double> &signal,
-        int nperseg,
-        int noverlap,
-        int nfft)
+        double secperseg,
+        double secoverlap,
+        double target_fs = 0.0)
     {
 #ifndef USE_FINUFFT
         throw std::runtime_error("computeSpectrogramNUFFT requires finufft support (USE_FINUFFT not defined)");
@@ -310,9 +312,6 @@ public:
 
         if (timestamps.size() != signal.size())
             throw std::runtime_error("timestamps and signal must have the same length");
-
-        if (nfft == 0)
-            nfft = nperseg;
 
         // Estimate median sampling rate
         std::vector<double> diffs;
@@ -323,12 +322,22 @@ public:
         double dt_median = diffs[diffs.size() / 2];
         double median_fs = 1.0 / dt_median;
 
-        // Window duration and hop in seconds
-        double win_dur = nperseg / median_fs;
-        double hop_dur = (nperseg - noverlap) / median_fs;
+        // Window duration and hop in seconds (input is already in seconds)
+        double win_dur = secperseg;
+        double hop_dur = secperseg - secoverlap;
+
+        // Compute nfft based on actual window duration and median sampling rate
+        int nfft = (int)(secperseg * median_fs);
+        // Round up to next power of 2 for efficiency
+        int nfft_padded = nfft;
+        {
+            int p = 1;
+            while (p < nfft) p <<= 1;
+            nfft_padded = p;
+        }
 
         // Frequency axis for positive frequencies
-        int n_pos_freqs = nfft / 2;
+        int n_pos_freqs = nfft_padded / 2;
         std::vector<double> freqs(n_pos_freqs);
         for (int i = 0; i < n_pos_freqs; ++i)
             freqs[i] = i / win_dur;
@@ -388,7 +397,7 @@ public:
             // Compute NUFFT using finufft
             // Allocate arrays for finufft (uses std::complex<double>)
             std::vector<std::complex<double>> c_complex(t_win.size());
-            std::vector<std::complex<double>> fhat_complex(nfft);
+            std::vector<std::complex<double>> fhat_complex(nfft_padded);
 
             // Fill input array with signal values as complex
             for (size_t i = 0; i < t_win.size(); ++i)
@@ -400,7 +409,7 @@ public:
             finufft_opts opts;
             finufft_default_opts(&opts);
 
-            long nfft_long = nfft;
+            long nfft_long = nfft_padded;
             ier = finufft_makeplan(1, 1, &nfft_long, +1, 1, 1e-14, &plan, &opts);
             if (ier != 0)
                 throw std::runtime_error("finufft_makeplan failed");
@@ -423,10 +432,10 @@ public:
 
             if (win_ss > 0.0)
             {
-                // Positive half starts at index nfft/2
+                // Positive half starts at index nfft_padded/2
                 for (int k = 0; k < n_pos_freqs; ++k)
                 {
-                    int idx = nfft / 2 + k;
+                    int idx = nfft_padded / 2 + k;
                     double real = fhat_complex[idx].real();
                     double imag = fhat_complex[idx].imag();
                     double mag_sq = real * real + imag * imag;
@@ -458,6 +467,37 @@ public:
             for (size_t i = 0; i < window_centres.size(); ++i)
                 result.times[i] = window_centres[i] - t_start;
             result.Sxx = spectra;
+        }
+
+        // If target_fs is specified, resample to a common frequency grid via cubic spline
+        if (target_fs > 0.0 && !result.Sxx.empty())
+        {
+            double fmax = target_fs / 2.0;
+            double freq_spacing = 1.0 / secperseg;
+
+            // Build target frequency grid
+            std::vector<double> target_freqs;
+            for (double f = 0; f <= fmax + freq_spacing / 2; f += freq_spacing)
+                target_freqs.push_back(f);
+
+            // Resample each time window using cubic spline
+            std::vector<std::vector<double>> resampled_Sxx(result.Sxx.size());
+
+            for (size_t t = 0; t < result.Sxx.size(); ++t)
+            {
+                const auto &psd_original = result.Sxx[t];
+
+                // Compute cubic spline coefficients
+                std::vector<double> freqs_dbl(freqs.begin(), freqs.end());
+                auto coeffs = computeNaturalCubicSplineCoeffs(freqs_dbl, psd_original);
+
+                // Evaluate at target frequencies
+                auto resampled = evaluateCubicSpline(freqs_dbl, psd_original, coeffs, target_freqs);
+                resampled_Sxx[t] = resampled;
+            }
+
+            result.freqs = target_freqs;
+            result.Sxx = resampled_Sxx;
         }
 
         return result;
@@ -1739,9 +1779,9 @@ py::array_t<double> computeShortTimeFT_wrapper(
 py::dict computeSpectrogramNUFFT_wrapper(
     py::array_t<double> timestamps,
     py::array_t<double> signal,
-    int nperseg,
-    int noverlap,
-    int nfft)
+    double secperseg,
+    double secoverlap,
+    double target_fs = 0.0)
 {
     auto ts_buf = timestamps.request();
     auto sig_buf = signal.request();
@@ -1750,7 +1790,7 @@ py::dict computeSpectrogramNUFFT_wrapper(
     std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
                                    static_cast<double *>(sig_buf.ptr) + sig_buf.size);
 
-    auto result = SensorProcessor::computeSpectrogramNUFFT(timestamps_vec, signal_vec, nperseg, noverlap, nfft);
+    auto result = SensorProcessor::computeSpectrogramNUFFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs);
 
     // Convert frequencies to NumPy array
     py::array_t<double> freqs(result.freqs.size());
@@ -2042,9 +2082,9 @@ PYBIND11_MODULE(_core, m)
           "Compute spectrogram from non-uniformly sampled data using finufft",
           py::arg("timestamps"),
           py::arg("signal"),
-          py::arg("nperseg"),
-          py::arg("noverlap"),
-          py::arg("nfft") = 0);
+          py::arg("secperseg"),
+          py::arg("secoverlap"),
+          py::arg("target_fs") = 0.0);
 #endif
 
     m.def("compute_short_time_ft", &computeShortTimeFT_wrapper,
