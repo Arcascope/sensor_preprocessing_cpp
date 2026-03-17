@@ -888,6 +888,156 @@ public:
         return {resampledTime, std::make_tuple(rx, ry, rz)};
     }
 
+    // ── Cubic-spline helpers ──────────────────────────────────────────
+    // Solve for natural cubic spline coefficients given knot values y
+    // at (not-necessarily-uniform) knot positions t.
+    // Returns vectors b, c, d such that on interval [t_i, t_i+1]:
+    //   S(x) = y_i + b_i*(x-t_i) + c_i*(x-t_i)^2 + d_i*(x-t_i)^3
+    struct CubicSplineCoeffs
+    {
+        std::vector<double> b, c, d;
+    };
+
+    static CubicSplineCoeffs computeNaturalCubicSplineCoeffs(
+        const std::vector<double> &t,
+        const std::vector<double> &y)
+    {
+        size_t n = t.size();
+        // n >= 2 guaranteed by caller
+
+        std::vector<double> h(n - 1);
+        for (size_t i = 0; i < n - 1; ++i)
+            h[i] = t[i + 1] - t[i];
+
+        // Solve tridiagonal system for c (natural boundary: c[0]=c[n-1]=0)
+        std::vector<double> alpha(n, 0.0);
+        for (size_t i = 1; i < n - 1; ++i)
+        {
+            alpha[i] = 3.0 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y[i - 1]) / h[i - 1]);
+        }
+
+        std::vector<double> c(n, 0.0);
+        std::vector<double> l(n, 1.0), mu(n, 0.0), z(n, 0.0);
+
+        for (size_t i = 1; i < n - 1; ++i)
+        {
+            l[i] = 2.0 * (t[i + 1] - t[i - 1]) - h[i - 1] * mu[i - 1];
+            mu[i] = h[i] / l[i];
+            z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i];
+        }
+
+        // Back-substitution
+        for (int i = static_cast<int>(n) - 2; i >= 0; --i)
+        {
+            c[i] = z[i] - mu[i] * c[i + 1];
+        }
+
+        std::vector<double> b(n - 1), d(n - 1);
+        for (size_t i = 0; i < n - 1; ++i)
+        {
+            d[i] = (c[i + 1] - c[i]) / (3.0 * h[i]);
+            b[i] = (y[i + 1] - y[i]) / h[i] - h[i] * (c[i + 1] + 2.0 * c[i]) / 3.0;
+        }
+
+        // Trim c to n-1 entries to match b, d
+        c.resize(n - 1);
+
+        return {b, c, d};
+    }
+
+    // Evaluate cubic spline at a set of sorted query points
+    static std::vector<double> evaluateCubicSpline(
+        const std::vector<double> &t,          // knot positions (sorted)
+        const std::vector<double> &y,          // knot values
+        const CubicSplineCoeffs &coeffs,
+        const std::vector<double> &queries)    // query positions (sorted)
+    {
+        size_t n = t.size();
+        size_t m = queries.size();
+        const auto &b = coeffs.b;
+        const auto &c = coeffs.c;
+        const auto &d = coeffs.d;
+
+        std::vector<double> result(m);
+        size_t seg = 0;
+
+        for (size_t j = 0; j < m; ++j)
+        {
+            double q = queries[j];
+
+            // Clamp to data range
+            if (q <= t[0])
+            {
+                result[j] = y[0];
+                continue;
+            }
+            if (q >= t[n - 1])
+            {
+                result[j] = y[n - 1];
+                continue;
+            }
+
+            // Advance segment pointer (queries are sorted)
+            while (seg < n - 2 && t[seg + 1] < q)
+                seg++;
+
+            double dx = q - t[seg];
+            result[j] = y[seg] + dx * (b[seg] + dx * (c[seg] + dx * d[seg]));
+        }
+
+        return result;
+    }
+
+    // ── Cubic-spline resampling ───────────────────────────────────────
+    static std::pair<std::vector<long>, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>>
+    resampleAccelerometerCubic(
+        const std::vector<long> &timestamps,
+        const std::vector<double> &x,
+        const std::vector<double> &y,
+        const std::vector<double> &z,
+        double targetFs)
+    {
+        size_t n = timestamps.size();
+        if (n < 2)
+        {
+            return {std::vector<long>(), std::make_tuple(std::vector<double>(), std::vector<double>(), std::vector<double>())};
+        }
+
+        long startTimeUs = timestamps.front();
+        long endTimeUs = timestamps.back();
+        double durationSec = (endTimeUs - startTimeUs) / 1000000.0;
+        int numSamples = static_cast<int>(durationSec * targetFs);
+        if (numSamples < 1)
+            numSamples = 1;
+
+        // Build uniform output time grid (microseconds)
+        double intervalUs = 1000000.0 / targetFs;
+        std::vector<long> resampledTime(numSamples);
+        std::vector<double> queryT(numSamples);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            resampledTime[i] = startTimeUs + static_cast<long>(i * intervalUs);
+            queryT[i] = static_cast<double>(resampledTime[i]);
+        }
+
+        // Convert timestamps to double for spline computation
+        std::vector<double> tDouble(n);
+        for (size_t i = 0; i < n; ++i)
+            tDouble[i] = static_cast<double>(timestamps[i]);
+
+        // Compute spline coefficients for each axis
+        auto coeffsX = computeNaturalCubicSplineCoeffs(tDouble, x);
+        auto coeffsY = computeNaturalCubicSplineCoeffs(tDouble, y);
+        auto coeffsZ = computeNaturalCubicSplineCoeffs(tDouble, z);
+
+        // Evaluate
+        auto rx = evaluateCubicSpline(tDouble, x, coeffsX, queryT);
+        auto ry = evaluateCubicSpline(tDouble, y, coeffsY, queryT);
+        auto rz = evaluateCubicSpline(tDouble, z, coeffsZ, queryT);
+
+        return {resampledTime, std::make_tuple(rx, ry, rz)};
+    }
+
     static std::pair<std::vector<long>, std::vector<double>> computeJerk(
         const std::vector<long> &timestamps,
         const std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> &accelerometerData)
@@ -1185,6 +1335,56 @@ py::dict resampleAccelerometer_wrapper(
                               static_cast<double *>(z_buf.ptr) + z_buf.size);
 
     auto result = SensorProcessor::resampleAccelerometer(ts_vec, x_vec, y_vec, z_vec, targetFs);
+    auto &resampled_time = result.first;
+    auto &[rx, ry, rz] = result.second;
+
+    py::array_t<int64_t> out_timestamps(resampled_time.size());
+    py::array_t<double> out_x(rx.size());
+    py::array_t<double> out_y(ry.size());
+    py::array_t<double> out_z(rz.size());
+
+    std::copy(resampled_time.begin(), resampled_time.end(),
+              static_cast<int64_t *>(out_timestamps.request().ptr));
+    std::copy(rx.begin(), rx.end(), static_cast<double *>(out_x.request().ptr));
+    std::copy(ry.begin(), ry.end(), static_cast<double *>(out_y.request().ptr));
+    std::copy(rz.begin(), rz.end(), static_cast<double *>(out_z.request().ptr));
+
+    py::dict result_dict;
+    result_dict["timestamps"] = out_timestamps;
+    result_dict["x"] = out_x;
+    result_dict["y"] = out_y;
+    result_dict["z"] = out_z;
+
+    return result_dict;
+}
+
+py::dict resampleAccelerometerCubic_wrapper(
+    py::array_t<int64_t> timestamps,
+    py::array_t<double> x,
+    py::array_t<double> y,
+    py::array_t<double> z,
+    double targetFs)
+{
+    auto ts_buf = timestamps.request();
+    auto x_buf = x.request();
+    auto y_buf = y.request();
+    auto z_buf = z.request();
+
+    if (ts_buf.size != x_buf.size || ts_buf.size != y_buf.size || ts_buf.size != z_buf.size)
+    {
+        throw std::runtime_error("Input arrays must have the same length");
+    }
+
+    std::vector<long> ts_vec(static_cast<long *>(ts_buf.ptr),
+                             static_cast<long *>(ts_buf.ptr) + ts_buf.size);
+    std::vector<double> x_vec(static_cast<double *>(x_buf.ptr),
+                              static_cast<double *>(x_buf.ptr) + x_buf.size);
+    std::vector<double> y_vec(static_cast<double *>(y_buf.ptr),
+                              static_cast<double *>(y_buf.ptr) + y_buf.size);
+    std::vector<double> z_vec(static_cast<double *>(z_buf.ptr),
+                              static_cast<double *>(z_buf.ptr) + z_buf.size);
+
+    auto result = SensorProcessor::resampleAccelerometerCubic(ts_vec, x_vec, y_vec, z_vec, targetFs);
     auto &resampled_time = result.first;
     auto &[rx, ry, rz] = result.second;
 
@@ -1575,6 +1775,14 @@ PYBIND11_MODULE(_core, m)
     // Main processing functions
     m.def("resample_accelerometer", &resampleAccelerometer_wrapper,
           "Resample accelerometer data to target sampling frequency",
+          py::arg("timestamps"),
+          py::arg("x"),
+          py::arg("y"),
+          py::arg("z"),
+          py::arg("targetFs"));
+
+    m.def("resample_accelerometer_cubic", &resampleAccelerometerCubic_wrapper,
+          "Resample accelerometer data using natural cubic spline interpolation",
           py::arg("timestamps"),
           py::arg("x"),
           py::arg("y"),
