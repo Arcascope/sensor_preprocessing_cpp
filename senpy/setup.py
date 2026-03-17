@@ -31,22 +31,40 @@ except Exception:
     # numpy may be installed in the isolated build env; it's okay if not available here
     pass
 
-# Add finufft configuration
-finufft_include_dir = "/tmp/finufft/include"
-finufft_lib_dir = "/tmp/finufft/build/src"
-finufft_lib_shared = "/tmp/finufft/build/src/libfinufft.so"
-fftw_include_dir_src = "/tmp/finufft/build/_deps/fftw3-src/api"  # fftw3.h in source
-fftw_include_dir_build = "/tmp/finufft/build/_deps/fftw3-build"  # config.h in build
+# Add finufft configuration - check multiple locations
+finufft_include_dirs = [
+    "/usr/local/include",  # Standard install location
+    "/usr/include",        # System-wide location
+    "/tmp/finufft/include",  # Development location
+]
+finufft_lib_dirs = [
+    "/usr/local/lib",      # Standard install location
+    "/usr/lib",            # System-wide location
+    "/tmp/finufft/build/src",  # Development location
+]
 
-# Check if finufft is available
-use_finufft = (os.path.exists(finufft_include_dir) and
-               os.path.exists(finufft_lib_shared))
+# Find finufft headers and library
+use_finufft = False
+finufft_include_dir = None
+finufft_lib_dir = None
+finufft_lib_shared = None
+
+for inc_dir in finufft_include_dirs:
+    if os.path.exists(os.path.join(inc_dir, "finufft.h")):
+        finufft_include_dir = inc_dir
+        break
+
+for lib_dir in finufft_lib_dirs:
+    lib_path = os.path.join(lib_dir, "libfinufft.so")
+    if os.path.exists(lib_path):
+        finufft_lib_dir = lib_dir
+        finufft_lib_shared = lib_path
+        use_finufft = True
+        break
 
 if use_finufft:
-    print(f"Finufft found at {finufft_lib_shared}")
+    print(f"Finufft found: include={finufft_include_dir}, lib={finufft_lib_shared}")
     include_dirs.append(finufft_include_dir)
-    include_dirs.append(fftw_include_dir_src)
-    include_dirs.append(fftw_include_dir_build)
 else:
     print("Finufft not found, building without NUFFT support")
 
@@ -62,8 +80,7 @@ ext_modules = [
             else ['-std=c++17', '-O3', '-march=native', '-DPYTHON']
         ),
         extra_link_args=(
-            [finufft_lib_shared, '-Wl,-rpath,' + finufft_lib_dir]
-            if use_finufft
+            [finufft_lib_shared, '-Wl,-rpath,' + finufft_lib_dir] if use_finufft and finufft_lib_dir
             else []
         ),
     ),

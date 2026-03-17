@@ -394,6 +394,7 @@ public:
             for (size_t i = 0; i < tau.size(); ++i)
                 x[i] = 2.0 * M_PI * tau[i] - M_PI;
 
+#ifdef USE_FINUFFT
             // Compute NUFFT using finufft
             // Allocate arrays for finufft (uses std::complex<double>)
             std::vector<std::complex<double>> c_complex(t_win.size());
@@ -445,6 +446,10 @@ public:
                         psd[k] *= 2.0;
                 }
             }
+#else
+            // Fallback: return empty spectrum when finufft not available
+            std::vector<double> psd(n_pos_freqs, 0.0);
+#endif
 
             spectra.push_back(psd);
             window_centres.push_back(win_start + win_dur / 2.0);
