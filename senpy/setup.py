@@ -31,13 +31,41 @@ except Exception:
     # numpy may be installed in the isolated build env; it's okay if not available here
     pass
 
+# Add finufft configuration
+finufft_include_dir = "/tmp/finufft/include"
+finufft_lib_dir = "/tmp/finufft/build/src"
+finufft_lib_shared = "/tmp/finufft/build/src/libfinufft.so"
+fftw_include_dir_src = "/tmp/finufft/build/_deps/fftw3-src/api"  # fftw3.h in source
+fftw_include_dir_build = "/tmp/finufft/build/_deps/fftw3-build"  # config.h in build
+
+# Check if finufft is available
+use_finufft = (os.path.exists(finufft_include_dir) and
+               os.path.exists(finufft_lib_shared))
+
+if use_finufft:
+    print(f"Finufft found at {finufft_lib_shared}")
+    include_dirs.append(finufft_include_dir)
+    include_dirs.append(fftw_include_dir_src)
+    include_dirs.append(fftw_include_dir_build)
+else:
+    print("Finufft not found, building without NUFFT support")
+
 ext_modules = [
     Extension(
         'senpy._core',  # Full module path - creates senpy/_core.so
         sources=sources,
         include_dirs=include_dirs,
         language='c++',
-        extra_compile_args=['-std=c++17', '-O3', '-march=native', '-DPYTHON'],
+        extra_compile_args=(
+            ['-std=c++17', '-O3', '-march=native', '-DPYTHON', '-DUSE_FINUFFT']
+            if use_finufft
+            else ['-std=c++17', '-O3', '-march=native', '-DPYTHON']
+        ),
+        extra_link_args=(
+            [finufft_lib_shared, '-Wl,-rpath,' + finufft_lib_dir]
+            if use_finufft
+            else []
+        ),
     ),
 ]
 

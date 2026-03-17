@@ -7,6 +7,12 @@
 #include <algorithm>
 #include <numeric>
 
+// Conditionally include finufft if available
+#ifdef USE_FINUFFT
+#include <fftw3.h>
+#include <finufft.h>
+#endif
+
 // Logging macros for Android
 // #define LOG_TAG "SensorProcessing"
 // #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -286,6 +292,174 @@ public:
 
             result.times[seg] = (start + nperseg / 2.0) / fs; // center time in sec
         }
+        return result;
+    }
+
+    // Compute spectrogram from non-uniformly sampled data using NUFFT
+    // Bypasses resampling to avoid spectral artifacts in the 0-10 Hz band
+    static SpectrogramResult computeSpectrogramNUFFT(
+        const std::vector<double> &timestamps,
+        const std::vector<double> &signal,
+        int nperseg,
+        int noverlap,
+        int nfft)
+    {
+#ifndef USE_FINUFFT
+        throw std::runtime_error("computeSpectrogramNUFFT requires finufft support (USE_FINUFFT not defined)");
+#endif
+
+        if (timestamps.size() != signal.size())
+            throw std::runtime_error("timestamps and signal must have the same length");
+
+        if (nfft == 0)
+            nfft = nperseg;
+
+        // Estimate median sampling rate
+        std::vector<double> diffs;
+        for (size_t i = 1; i < timestamps.size(); ++i)
+            diffs.push_back(timestamps[i] - timestamps[i-1]);
+
+        std::sort(diffs.begin(), diffs.end());
+        double dt_median = diffs[diffs.size() / 2];
+        double median_fs = 1.0 / dt_median;
+
+        // Window duration and hop in seconds
+        double win_dur = nperseg / median_fs;
+        double hop_dur = (nperseg - noverlap) / median_fs;
+
+        // Frequency axis for positive frequencies
+        int n_pos_freqs = nfft / 2;
+        std::vector<double> freqs(n_pos_freqs);
+        for (int i = 0; i < n_pos_freqs; ++i)
+            freqs[i] = i / win_dur;
+
+        // Prepare output
+        std::vector<double> window_centres;
+        std::vector<std::vector<double>> spectra;
+
+        double t_start = timestamps[0];
+        double t_end = timestamps[timestamps.size() - 1];
+
+        // Sliding window loop
+        double win_start = t_start;
+        while (win_start + win_dur <= t_end + dt_median)
+        {
+            double win_end = win_start + win_dur;
+
+            // Select samples in window
+            std::vector<double> t_win, s_win;
+            for (size_t i = 0; i < timestamps.size(); ++i)
+            {
+                if (timestamps[i] >= win_start && timestamps[i] < win_end)
+                {
+                    t_win.push_back(timestamps[i]);
+                    s_win.push_back(signal[i]);
+                }
+            }
+
+            if (t_win.size() < 4)
+            {
+                // Skip windows with too few samples
+                win_start += hop_dur;
+                continue;
+            }
+
+            // Compute tau and Hann window
+            std::vector<double> tau(t_win.size());
+            std::vector<double> hann(t_win.size());
+            double s_mean = 0.0;
+            for (size_t i = 0; i < s_win.size(); ++i)
+                s_mean += s_win[i];
+            s_mean /= s_win.size();
+
+            // Apply Hann window and detrend
+            for (size_t i = 0; i < t_win.size(); ++i)
+            {
+                tau[i] = (t_win[i] - win_start) / win_dur;
+                hann[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * tau[i]));
+                s_win[i] = (s_win[i] - s_mean) * hann[i];
+            }
+
+            // Map to NUFFT domain [-pi, pi)
+            std::vector<double> x(t_win.size());
+            for (size_t i = 0; i < tau.size(); ++i)
+                x[i] = 2.0 * M_PI * tau[i] - M_PI;
+
+            // Compute NUFFT using finufft
+            // Allocate arrays for finufft (uses std::complex<double>)
+            std::vector<std::complex<double>> c_complex(t_win.size());
+            std::vector<std::complex<double>> fhat_complex(nfft);
+
+            // Fill input array with signal values as complex
+            for (size_t i = 0; i < t_win.size(); ++i)
+                c_complex[i] = std::complex<double>(s_win[i], 0.0);
+
+            // Make plan and execute
+            int ier = 0;
+            finufft_plan plan = nullptr;
+            finufft_opts opts;
+            finufft_default_opts(&opts);
+
+            long nfft_long = nfft;
+            ier = finufft_makeplan(1, 1, &nfft_long, +1, 1, 1e-14, &plan, &opts);
+            if (ier != 0)
+                throw std::runtime_error("finufft_makeplan failed");
+
+            ier = finufft_setpts(plan, (long)t_win.size(), x.data(), nullptr, nullptr, 0, nullptr, nullptr, nullptr);
+            if (ier != 0)
+                throw std::runtime_error("finufft_setpts failed");
+
+            ier = finufft_execute(plan, c_complex.data(), fhat_complex.data());
+            if (ier != 0)
+                throw std::runtime_error("finufft_execute failed");
+
+            finufft_destroy(plan);
+
+            // Extract positive frequencies and compute PSD
+            std::vector<double> psd(n_pos_freqs);
+            double win_ss = 0.0;
+            for (size_t i = 0; i < hann.size(); ++i)
+                win_ss += hann[i] * hann[i];
+
+            if (win_ss > 0.0)
+            {
+                // Positive half starts at index nfft/2
+                for (int k = 0; k < n_pos_freqs; ++k)
+                {
+                    int idx = nfft / 2 + k;
+                    double real = fhat_complex[idx].real();
+                    double imag = fhat_complex[idx].imag();
+                    double mag_sq = real * real + imag * imag;
+                    psd[k] = mag_sq / (median_fs * win_ss);
+                    // One-sided: DC unchanged, k>0 × 2
+                    if (k > 0)
+                        psd[k] *= 2.0;
+                }
+            }
+
+            spectra.push_back(psd);
+            window_centres.push_back(win_start + win_dur / 2.0);
+
+            win_start += hop_dur;
+        }
+
+        // Build result
+        SpectrogramResult result;
+        result.freqs = freqs;
+
+        if (spectra.empty())
+        {
+            result.times.clear();
+            result.Sxx.clear();
+        }
+        else
+        {
+            result.times.resize(window_centres.size());
+            for (size_t i = 0; i < window_centres.size(); ++i)
+                result.times[i] = window_centres[i] - t_start;
+            result.Sxx = spectra;
+        }
+
         return result;
     }
 
@@ -1561,6 +1735,60 @@ py::array_t<double> computeShortTimeFT_wrapper(
     return output;
 }
 
+#ifdef USE_FINUFFT
+py::dict computeSpectrogramNUFFT_wrapper(
+    py::array_t<double> timestamps,
+    py::array_t<double> signal,
+    int nperseg,
+    int noverlap,
+    int nfft)
+{
+    auto ts_buf = timestamps.request();
+    auto sig_buf = signal.request();
+    std::vector<double> timestamps_vec(static_cast<double *>(ts_buf.ptr),
+                                       static_cast<double *>(ts_buf.ptr) + ts_buf.size);
+    std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
+                                   static_cast<double *>(sig_buf.ptr) + sig_buf.size);
+
+    auto result = SensorProcessor::computeSpectrogramNUFFT(timestamps_vec, signal_vec, nperseg, noverlap, nfft);
+
+    // Convert frequencies to NumPy array
+    py::array_t<double> freqs(result.freqs.size());
+    std::copy(result.freqs.begin(), result.freqs.end(),
+              static_cast<double *>(freqs.request().ptr));
+
+    // Convert times to NumPy array
+    py::array_t<double> times(result.times.size());
+    std::copy(result.times.begin(), result.times.end(),
+              static_cast<double *>(times.request().ptr));
+
+    // Convert Sxx to 2D NumPy array (times x freqs)
+    size_t n_times = result.Sxx.size();
+    size_t n_freqs = (n_times > 0) ? result.Sxx[0].size() : 0;
+    py::array_t<double> Sxx({n_times, n_freqs});
+
+    if (n_times > 0 && n_freqs > 0)
+    {
+        auto Sxx_buf = Sxx.request();
+        double *Sxx_ptr = static_cast<double *>(Sxx_buf.ptr);
+        for (size_t t = 0; t < n_times; ++t)
+        {
+            for (size_t f = 0; f < n_freqs; ++f)
+            {
+                Sxx_ptr[t * n_freqs + f] = result.Sxx[t][f];
+            }
+        }
+    }
+
+    py::dict result_dict;
+    result_dict["freqs"] = freqs;
+    result_dict["times"] = times;
+    result_dict["Sxx"] = Sxx;
+
+    return result_dict;
+}
+#endif
+
 py::dict computeMotionFeatures_wrapper(
     py::array_t<double> jerkSignal,
     double fs,
@@ -1808,6 +2036,16 @@ PYBIND11_MODULE(_core, m)
           py::arg("fs"),
           py::arg("nperseg"),
           py::arg("noverlap"));
+
+#ifdef USE_FINUFFT
+    m.def("compute_spectrogram_nufft", &computeSpectrogramNUFFT_wrapper,
+          "Compute spectrogram from non-uniformly sampled data using finufft",
+          py::arg("timestamps"),
+          py::arg("signal"),
+          py::arg("nperseg"),
+          py::arg("noverlap"),
+          py::arg("nfft") = 0);
+#endif
 
     m.def("compute_short_time_ft", &computeShortTimeFT_wrapper,
           "Compute Short-Time Fourier Transform returning complex values (n_times, n_frequencies, 2)",

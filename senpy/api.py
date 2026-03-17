@@ -440,8 +440,7 @@ def compute_spectrogram_nufft(
 
     1. Selects the non-uniform samples falling within the window.
     2. Applies a Hann window evaluated at the true sample times.
-    3. Computes the spectrum via type-1 NUFFT (finufft if installed,
-       otherwise a direct O(NM) DFT fallback).
+    3. Computes the spectrum via type-1 NUFFT using finufft (via C++ backend).
 
     Because no resampling interpolation is involved, the result is free
     of the spectral artifacts that linear or spline resampling introduce
@@ -465,132 +464,24 @@ def compute_spectrogram_nufft(
     if len(timestamps) != len(signal):
         raise ValueError("timestamps and signal must have the same length")
 
+    # Convert timestamps to seconds if needed
     conversion = {"s": 1.0, "ms": 1e-3, "us": 1e-6}.get(ts_unit, 1.0)
-    t = timestamps.astype(np.float64) * conversion  # seconds
+    t = timestamps.astype(np.float64) * conversion
 
-    # Estimate median sampling rate from data
-    dt_median = np.median(np.diff(t))
-    median_fs = 1.0 / dt_median
-
-    # Window duration and hop in seconds
-    win_dur = nperseg / median_fs
-    hop_dur = (nperseg - noverlap) / median_fs
-
+    # Default nfft
     if nfft is None:
         nfft = nperseg
 
-    # Frequency axis (positive frequencies only, excluding Nyquist)
-    # Type-1 NUFFT gives modes k = -nfft//2 … nfft//2-1.
-    # Positive modes are k = 0 … nfft//2-1 → nfft//2 bins.
-    n_pos_freqs = nfft // 2
-    freqs = np.arange(n_pos_freqs) / win_dur  # Hz
-
-    # Slide windows
-    t_start = t[0]
-    t_end = t[-1]
-    window_centres = []
-    spectra = []
-
-    win_start = t_start
-    while win_start + win_dur <= t_end + dt_median:
-        win_end = win_start + win_dur
-
-        # Select samples inside this window
-        mask = (t >= win_start) & (t < win_end)
-        t_win = t[mask]
-        s_win = signal[mask]
-
-        if len(t_win) < 4:
-            # Too few samples — skip this window
-            win_start += hop_dur
-            continue
-
-        # Hann window evaluated at the actual sample times
-        # (normalised to [0, 1] within the window)
-        tau = (t_win - win_start) / win_dur
-        hann = 0.5 * (1.0 - np.cos(2.0 * np.pi * tau))
-
-        # Detrend (remove mean) then apply window
-        s_win = (s_win - np.mean(s_win)) * hann
-
-        # Map times to [-π, π) for NUFFT
-        x = 2.0 * np.pi * tau - np.pi
-
-        # Type-1 NUFFT → Fourier coefficients at integer modes
-        # We need modes k = 0 … nfft//2 (positive frequencies).
-        # The type-1 gives k = -N//2 … N//2-1, so request nfft modes
-        # and extract the positive half.
-        fhat = _nufft_type1(x, s_win.astype(np.complex128), nfft)
-
-        # fhat is indexed k = -nfft//2 … nfft//2-1.
-        # Positive frequencies correspond to k = 0 … nfft//2.
-        # After ifftshift, index i maps to k = i - nfft//2.
-        # So k=0 is at index nfft//2, and k=nfft//2 is at index nfft.
-        pos_start = nfft // 2  # index of k=0
-        pos_end = pos_start + n_pos_freqs
-
-        fhat_pos = fhat[pos_start:pos_end]
-
-        # Power spectral density (magnitude-squared, density-scaled)
-        # Scale to match scipy.signal.spectrogram 'density' + 'onesided' scaling:
-        #   Sxx = |X|^2 / (fs * sum(window^2))   [for DC]
-        #   Sxx = 2 * |X|^2 / (fs * sum(window^2)) [for f > 0, one-sided spectrum]
-        # The factor of 2 accounts for power folded in from negative frequencies.
-        win_ss = np.sum(hann ** 2)
-        if win_ss > 0:
-            psd = np.abs(fhat_pos) ** 2 / (median_fs * win_ss)
-            # Apply one-sided doubling: k=0 (DC) stays as-is, k>0 × 2
-            psd[1:] *= 2.0
-        else:
-            psd = np.zeros(n_pos_freqs)
-
-        spectra.append(psd)
-        window_centres.append(win_start + win_dur / 2.0)
-
-        win_start += hop_dur
-
-    if len(spectra) == 0:
+    # Call C++ backend
+    try:
+        result_dict = _senpy.compute_spectrogram_nufft(t, signal.astype(np.float64), nperseg, noverlap, nfft)
         return SpectrogramResult(
-            frequencies=freqs,
-            times=np.array([]),
-            Sxx=np.empty((0, n_pos_freqs)),
+            frequencies=result_dict["freqs"],
+            times=result_dict["times"],
+            Sxx=result_dict["Sxx"]
         )
-
-    Sxx = np.array(spectra)  # (n_times, n_freqs)
-    times = np.array(window_centres) - t[0]  # relative time in seconds
-
-    return SpectrogramResult(frequencies=freqs, times=times, Sxx=Sxx)
-
-
-def resample_accelerometer_nufft(
-    timestamps: NDArray[np.float64],
-    x: NDArray[np.float64],
-    y: NDArray[np.float64],
-    z: NDArray[np.float64],
-    target_fs: float,
-    ts_unit: str = "s",
-) -> AccelerometerData:
-    """Resample accelerometer data using cubic spline interpolation
-    followed by an anti-aliasing low-pass filter at the target Nyquist.
-
-    This combines the accuracy of spline interpolation with proper
-    anti-aliasing, giving cleaner spectral behaviour than either
-    linear interpolation or splines alone.
-
-    For artifact-free spectral analysis, prefer ``compute_spectrogram_nufft``
-    which bypasses resampling entirely.
-
-    Args:
-        timestamps: Sample timestamps.
-        x, y, z: Acceleration components.
-        target_fs: Target sampling frequency in Hz.
-        ts_unit: Timestamp unit — ``'s'``, ``'ms'``, or ``'us'``.
-
-    Returns:
-        AccelerometerData on a uniform grid at *target_fs*.
-    """
-    # Delegate to cubic spline resampling (best time-domain method)
-    return resample_accelerometer_cubic(timestamps, x, y, z, target_fs, ts_unit=ts_unit)
+    except RuntimeError as e:
+        raise RuntimeError(f"C++ NUFFT computation failed: {e}")
 
 
 def compute_jerk(
@@ -1016,7 +907,6 @@ __all__ = [
     "resample_accelerometer",
     "resample_accelerometer_cubic",
     "resample_accelerometer_cubic_microseconds",
-    "resample_accelerometer_nufft",
     "compute_spectrogram_nufft",
     "compute_jerk",
     "compute_magnitude",
