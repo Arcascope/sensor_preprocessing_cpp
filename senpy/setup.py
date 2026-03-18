@@ -104,16 +104,27 @@ print(f"finufft_include_dir: {finufft_include_dir}")
 print(f"finufft_lib_shared: {finufft_lib_shared}")
 print(f"{'='*80}\n")
 
+# When linking a static library into a shared library, we need --whole-archive
+# to ensure all symbols are included (not just the ones we reference directly)
+link_args = []
+if finufft_lib_dir:
+    # Use --whole-archive for finufft static lib to pull in all symbols
+    if finufft_lib_shared.endswith('.a'):
+        link_args = ['-Wl,--whole-archive', finufft_lib_shared, '-Wl,--no-whole-archive']
+    link_args.append('-Wl,-rpath,' + finufft_lib_dir)
+
+print(f"Link args (whole-archive aware): {link_args}")
+
 ext_modules = [
     Extension(
         'senpy._core',  # Full module path - creates senpy/_core.so
         sources=sources,
         include_dirs=include_dirs,
         library_dirs=[finufft_lib_dir] if finufft_lib_dir else [],
-        libraries=['finufft', 'fftw3f_omp', 'fftw3_omp', 'fftw3f', 'fftw3', 'gomp'],
+        libraries=['fftw3f_omp', 'fftw3_omp', 'fftw3f', 'fftw3', 'gomp'],
         language='c++',
         extra_compile_args=['-std=c++17', '-O3', '-march=native', '-DPYTHON', '-DUSE_FINUFFT', '-fopenmp'],
-        extra_link_args=['-Wl,-rpath,' + finufft_lib_dir] if finufft_lib_dir else [],
+        extra_link_args=link_args,
     ),
 ]
 
