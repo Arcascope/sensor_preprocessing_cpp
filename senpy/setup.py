@@ -96,17 +96,24 @@ if not use_finufft:
 print(f"✓ Finufft found: include={finufft_include_dir}, lib={finufft_lib_shared}")
 include_dirs.append(finufft_include_dir)
 
+print(f"\n{'='*80}")
+print(f"SETUP.PY DEBUG INFO")
+print(f"{'='*80}")
+print(f"finufft_lib_dir: {finufft_lib_dir}")
+print(f"finufft_include_dir: {finufft_include_dir}")
+print(f"finufft_lib_shared: {finufft_lib_shared}")
+print(f"{'='*80}\n")
+
 ext_modules = [
     Extension(
         'senpy._core',  # Full module path - creates senpy/_core.so
         sources=sources,
         include_dirs=include_dirs,
+        library_dirs=[finufft_lib_dir] if finufft_lib_dir else [],
+        libraries=['finufft', 'fftw3f_omp', 'fftw3_omp', 'fftw3f', 'fftw3', 'gomp'],
         language='c++',
         extra_compile_args=['-std=c++17', '-O3', '-march=native', '-DPYTHON', '-DUSE_FINUFFT', '-fopenmp'],
-        extra_link_args=(
-            ['-L' + finufft_lib_dir, '-Wl,-rpath,' + finufft_lib_dir, '-lfinufft', '-fopenmp', '-lgomp', '-lfftw3f_omp', '-lfftw3_omp', '-lfftw3f', '-lfftw3']
-            if finufft_lib_dir else ['-lfinufft', '-fopenmp', '-lgomp', '-lfftw3f_omp', '-lfftw3_omp', '-lfftw3f', '-lfftw3']
-        ),
+        extra_link_args=['-Wl,-rpath,' + finufft_lib_dir] if finufft_lib_dir else [],
     ),
 ]
 
