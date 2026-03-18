@@ -102,8 +102,11 @@ ext_modules = [
         sources=sources,
         include_dirs=include_dirs,
         language='c++',
-        extra_compile_args=['-std=c++17', '-O3', '-march=native', '-DPYTHON', '-DUSE_FINUFFT'],
-        extra_link_args=[finufft_lib_shared, '-Wl,-rpath,' + finufft_lib_dir] if finufft_lib_dir else [],
+        extra_compile_args=['-std=c++17', '-O3', '-march=native', '-DPYTHON', '-DUSE_FINUFFT', '-fopenmp'],
+        extra_link_args=(
+            [finufft_lib_shared, '-Wl,-rpath,' + finufft_lib_dir, '-fopenmp', '-lgomp']
+            if finufft_lib_dir else ['-fopenmp', '-lgomp']
+        ),
     ),
 ]
 
