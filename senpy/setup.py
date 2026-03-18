@@ -104,8 +104,8 @@ ext_modules = [
         language='c++',
         extra_compile_args=['-std=c++17', '-O3', '-march=native', '-DPYTHON', '-DUSE_FINUFFT', '-fopenmp'],
         extra_link_args=(
-            [finufft_lib_shared, '-Wl,-rpath,' + finufft_lib_dir, '-fopenmp', '-lgomp', '-lfftw3f_omp', '-lfftw3_omp', '-lfftw3f', '-lfftw3']
-            if finufft_lib_dir else ['-fopenmp', '-lgomp', '-lfftw3f_omp', '-lfftw3_omp', '-lfftw3f', '-lfftw3']
+            ['-L' + finufft_lib_dir, '-Wl,-rpath,' + finufft_lib_dir, '-lfinufft', '-fopenmp', '-lgomp', '-lfftw3f_omp', '-lfftw3_omp', '-lfftw3f', '-lfftw3']
+            if finufft_lib_dir else ['-lfinufft', '-fopenmp', '-lgomp', '-lfftw3f_omp', '-lfftw3_omp', '-lfftw3f', '-lfftw3']
         ),
     ),
 ]
