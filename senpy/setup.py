@@ -33,13 +33,15 @@ except Exception:
 
 # Add finufft configuration - check multiple locations
 finufft_include_dirs = [
-    "/usr/local/include",  # Standard install location
-    "/usr/include",        # System-wide location
-    "/tmp/finufft/include",  # Development location
+    "/usr/local/include",      # Standard install location
+    "/usr/include",            # System-wide location
+    "/opt/finufft/include",    # Docker build location
+    "/tmp/finufft/include",    # Development location
 ]
 finufft_lib_dirs = [
-    "/usr/local/lib",      # Standard install location
-    "/usr/lib",            # System-wide location
+    "/usr/local/lib",          # Standard install location
+    "/usr/lib",                # System-wide location
+    "/opt/finufft/build/src",  # Docker build location
     "/tmp/finufft/build/src",  # Development location
 ]
 
@@ -49,24 +51,50 @@ finufft_include_dir = None
 finufft_lib_dir = None
 finufft_lib_shared = None
 
+# First, find the include directory
 for inc_dir in finufft_include_dirs:
-    if os.path.exists(os.path.join(inc_dir, "finufft.h")):
+    header_path = os.path.join(inc_dir, "finufft.h")
+    if os.path.exists(header_path):
         finufft_include_dir = inc_dir
+        print(f"Found finufft.h at: {header_path}")
         break
 
-for lib_dir in finufft_lib_dirs:
-    lib_path = os.path.join(lib_dir, "libfinufft.so")
-    if os.path.exists(lib_path):
-        finufft_lib_dir = lib_dir
-        finufft_lib_shared = lib_path
-        use_finufft = True
-        break
+# Then find the library in the same locations
+# Check for shared library first (.so), then static (.a)
+if finufft_include_dir:
+    for lib_dir in finufft_lib_dirs:
+        # Try shared library variants first
+        for lib_name in ["libfinufft.so", "libfinufft.so.0"]:
+            lib_path = os.path.join(lib_dir, lib_name)
+            if os.path.exists(lib_path):
+                finufft_lib_dir = lib_dir
+                finufft_lib_shared = lib_path
+                use_finufft = True
+                print(f"Found {lib_name} at: {lib_path}")
+                break
+        if use_finufft:
+            break
 
-if use_finufft:
-    print(f"Finufft found: include={finufft_include_dir}, lib={finufft_lib_shared}")
-    include_dirs.append(finufft_include_dir)
-else:
-    print("Finufft not found, building without NUFFT support")
+# If no shared library, try static library
+if finufft_include_dir and not use_finufft:
+    for lib_dir in finufft_lib_dirs:
+        lib_path = os.path.join(lib_dir, "libfinufft.a")
+        if os.path.exists(lib_path):
+            finufft_lib_dir = lib_dir
+            finufft_lib_shared = lib_path
+            use_finufft = True
+            print(f"Found libfinufft.a (static) at: {lib_path}")
+            break
+
+if not use_finufft:
+    if finufft_include_dir:
+        raise RuntimeError(f"Finufft header found but library not found in: {finufft_lib_dirs}")
+    else:
+        raise RuntimeError(f"Finufft is REQUIRED but not found. Searched in: {finufft_include_dirs}\n"
+                          f"Please install finufft to /usr/local or set FINUFFT_PATH environment variable")
+
+print(f"✓ Finufft found: include={finufft_include_dir}, lib={finufft_lib_shared}")
+include_dirs.append(finufft_include_dir)
 
 ext_modules = [
     Extension(
@@ -74,15 +102,8 @@ ext_modules = [
         sources=sources,
         include_dirs=include_dirs,
         language='c++',
-        extra_compile_args=(
-            ['-std=c++17', '-O3', '-march=native', '-DPYTHON', '-DUSE_FINUFFT']
-            if use_finufft
-            else ['-std=c++17', '-O3', '-march=native', '-DPYTHON']
-        ),
-        extra_link_args=(
-            [finufft_lib_shared, '-Wl,-rpath,' + finufft_lib_dir] if use_finufft and finufft_lib_dir
-            else []
-        ),
+        extra_compile_args=['-std=c++17', '-O3', '-march=native', '-DPYTHON', '-DUSE_FINUFFT'],
+        extra_link_args=[finufft_lib_shared, '-Wl,-rpath,' + finufft_lib_dir] if finufft_lib_dir else [],
     ),
 ]
 

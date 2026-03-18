@@ -7,11 +7,9 @@
 #include <algorithm>
 #include <numeric>
 
-// Conditionally include finufft if available
-#ifdef USE_FINUFFT
+// finufft is now mandatory
 #include <fftw3.h>
 #include <finufft.h>
-#endif
 
 // Logging macros for Android
 // #define LOG_TAG "SensorProcessing"
@@ -306,10 +304,6 @@ public:
         double secoverlap,
         double target_fs = 0.0)
     {
-#ifndef USE_FINUFFT
-        throw std::runtime_error("computeSpectrogramNUFFT requires finufft support (USE_FINUFFT not defined)");
-#endif
-
         if (timestamps.size() != signal.size())
             throw std::runtime_error("timestamps and signal must have the same length");
 
@@ -394,8 +388,7 @@ public:
             for (size_t i = 0; i < tau.size(); ++i)
                 x[i] = 2.0 * M_PI * tau[i] - M_PI;
 
-#ifdef USE_FINUFFT
-            // Compute NUFFT using finufft
+            // Compute NUFFT using finufft (now mandatory)
             // Allocate arrays for finufft (uses std::complex<double>)
             std::vector<std::complex<double>> c_complex(t_win.size());
             std::vector<std::complex<double>> fhat_complex(nfft_padded);
@@ -446,10 +439,6 @@ public:
                         psd[k] *= 2.0;
                 }
             }
-#else
-            // Fallback: return empty spectrum when finufft not available
-            std::vector<double> psd(n_pos_freqs, 0.0);
-#endif
 
             spectra.push_back(psd);
             window_centres.push_back(win_start + win_dur / 2.0);
