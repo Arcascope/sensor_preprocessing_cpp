@@ -432,17 +432,15 @@ public:
 
             if (win_ss > 0.0)
             {
+                // Match computeSpectrogram: magnitude / sqrt(fs * Σw²)
+                double scale_factor = 1.0 / std::sqrt(median_fs * win_ss);
                 // Positive half starts at index nfft_padded/2
                 for (int k = 0; k < n_pos_freqs; ++k)
                 {
                     int idx = nfft_padded / 2 + k;
                     double real = fhat_complex[idx].real();
                     double imag = fhat_complex[idx].imag();
-                    double mag_sq = real * real + imag * imag;
-                    psd[k] = mag_sq / (median_fs * win_ss);
-                    // One-sided: DC unchanged, k>0 × 2
-                    if (k > 0)
-                        psd[k] *= 2.0;
+                    psd[k] = std::sqrt(real * real + imag * imag) * scale_factor;
                 }
             }
 
