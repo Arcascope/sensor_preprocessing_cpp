@@ -9,7 +9,6 @@
 
 // Conditionally include finufft if available
 #ifdef USE_FINUFFT
-#include <fftw3.h>
 #include <finufft.h>
 #endif
 
@@ -409,12 +408,12 @@ public:
             finufft_opts opts;
             finufft_default_opts(&opts);
 
-            long nfft_long = nfft_padded;
+            int64_t nfft_long = nfft_padded;
             ier = finufft_makeplan(1, 1, &nfft_long, +1, 1, 1e-14, &plan, &opts);
             if (ier != 0)
                 throw std::runtime_error("finufft_makeplan failed");
 
-            ier = finufft_setpts(plan, (long)t_win.size(), x.data(), nullptr, nullptr, 0, nullptr, nullptr, nullptr);
+            ier = finufft_setpts(plan, (int64_t)t_win.size(), x.data(), nullptr, nullptr, 0, nullptr, nullptr, nullptr);
             if (ier != 0)
                 throw std::runtime_error("finufft_setpts failed");
 
