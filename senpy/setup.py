@@ -31,24 +31,19 @@ except Exception:
     # numpy may be installed in the isolated build env; it's okay if not available here
     pass
 
-# Add finufft configuration
-finufft_include_dir = "/tmp/finufft/include"
-finufft_lib_dir = "/tmp/finufft/build/src"
-finufft_lib_shared = "/tmp/finufft/build/src/libfinufft.so"
-fftw_include_dir_src = "/tmp/finufft/build/_deps/fftw3-src/api"  # fftw3.h in source
-fftw_include_dir_build = "/tmp/finufft/build/_deps/fftw3-build"  # config.h in build
+# Finufft built by the top-level CMake into build/_deps/
+BUILD_DIR = os.path.abspath(os.path.join(ROOT_DIR, '..', 'build'))
+finufft_include_dir = os.path.join(BUILD_DIR, "_deps/finufft-src/include")
+finufft_lib_dir = os.path.join(BUILD_DIR, "_deps/finufft-build/src")
+finufft_lib_so = os.path.join(finufft_lib_dir, "libfinufft.so")
+fftw3_lib = os.path.join(BUILD_DIR, "_deps/fftw3-build/libfftw3.a")
+fftw3f_lib = os.path.join(BUILD_DIR, "_deps/fftw3f-build/libfftw3f.a")
 
-# Check if finufft is available
-use_finufft = (os.path.exists(finufft_include_dir) and
-               os.path.exists(finufft_lib_shared))
+for p in [finufft_include_dir, finufft_lib_so, fftw3_lib, fftw3f_lib]:
+    if not os.path.exists(p):
+        raise RuntimeError(f"Required finufft build artifact not found: {p}\nRun: cd .. && cmake -S . -B build -DFINUFFT_STATIC_LINKING=OFF && cmake --build build")
 
-if use_finufft:
-    print(f"Finufft found at {finufft_lib_shared}")
-    include_dirs.append(finufft_include_dir)
-    include_dirs.append(fftw_include_dir_src)
-    include_dirs.append(fftw_include_dir_build)
-else:
-    print("Finufft not found, building without NUFFT support")
+include_dirs.append(finufft_include_dir)
 
 ext_modules = [
     Extension(
@@ -56,16 +51,14 @@ ext_modules = [
         sources=sources,
         include_dirs=include_dirs,
         language='c++',
-        extra_compile_args=(
-            ['-std=c++17', '-O3', '-march=native', '-DPYTHON', '-DUSE_FINUFFT']
-            if use_finufft
-            else ['-std=c++17', '-O3', '-march=native', '-DPYTHON']
-        ),
-        extra_link_args=(
-            [finufft_lib_shared, '-Wl,-rpath,' + finufft_lib_dir]
-            if use_finufft
-            else []
-        ),
+        extra_compile_args=['-std=c++17', '-O3', '-march=native', '-DPYTHON'],
+        extra_link_args=[
+            f'-L{finufft_lib_dir}',
+            '-lfinufft',
+            fftw3_lib, fftw3f_lib,
+            f'-Wl,-rpath,{finufft_lib_dir}',
+            '-lgomp',
+        ],
     ),
 ]
 

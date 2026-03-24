@@ -75,7 +75,7 @@ target_compile_definitions(sensor_processing PRIVATE USE_FINUFFT)
 if(ANDROID)
     # Android-specific settings
     find_library(log-lib log)
-    target_link_libraries(sensor_processing ${log-lib})
+    target_link_libraries(sensor_processing PRIVATE ${log-lib})
     
 elseif(APPLE)
     # macOS/iOS-specific settings
@@ -90,7 +90,7 @@ elseif(WIN32)
     
 elseif(UNIX)
     # Linux-specific settings
-    target_link_libraries(sensor_processing m pthread)
+    target_link_libraries(sensor_processing PRIVATE m pthread)
 endif()
 
 # Install rules

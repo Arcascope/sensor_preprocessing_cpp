@@ -7,10 +7,7 @@
 #include <algorithm>
 #include <numeric>
 
-// Conditionally include finufft if available
-#ifdef USE_FINUFFT
 #include <finufft.h>
-#endif
 
 // Logging macros for Android
 // #define LOG_TAG "SensorProcessing"
@@ -305,10 +302,6 @@ public:
         double secoverlap,
         double target_fs = 0.0)
     {
-#ifndef USE_FINUFFT
-        throw std::runtime_error("computeSpectrogramNUFFT requires finufft support (USE_FINUFFT not defined)");
-#endif
-
         if (timestamps.size() != signal.size())
             throw std::runtime_error("timestamps and signal must have the same length");
 
@@ -1772,7 +1765,6 @@ py::array_t<double> computeShortTimeFT_wrapper(
     return output;
 }
 
-#ifdef USE_FINUFFT
 py::dict computeSpectrogramNUFFT_wrapper(
     py::array_t<double> timestamps,
     py::array_t<double> signal,
@@ -1824,7 +1816,6 @@ py::dict computeSpectrogramNUFFT_wrapper(
 
     return result_dict;
 }
-#endif
 
 py::dict computeMotionFeatures_wrapper(
     py::array_t<double> jerkSignal,
@@ -2074,7 +2065,6 @@ PYBIND11_MODULE(_core, m)
           py::arg("nperseg"),
           py::arg("noverlap"));
 
-#ifdef USE_FINUFFT
     m.def("compute_spectrogram_nufft", &computeSpectrogramNUFFT_wrapper,
           "Compute spectrogram from non-uniformly sampled data using finufft",
           py::arg("timestamps"),
@@ -2082,7 +2072,6 @@ PYBIND11_MODULE(_core, m)
           py::arg("secperseg"),
           py::arg("secoverlap"),
           py::arg("target_fs") = 0.0);
-#endif
 
     m.def("compute_short_time_ft", &computeShortTimeFT_wrapper,
           "Compute Short-Time Fourier Transform returning complex values (n_times, n_frequencies, 2)",
