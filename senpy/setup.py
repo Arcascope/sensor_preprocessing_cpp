@@ -18,7 +18,7 @@ ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
 CPP_DIR = os.path.abspath(os.path.join(ROOT_DIR, '..', 'src'))
 
 # explicit binding file in this directory
-PROCESSING_SRC = os.path.join(CPP_DIR, 'sensor_processing_native.cpp')
+PROCESSING_SRC = os.path.join('..', 'src', 'sensor_processing_native.cpp')
 
 # ensure we compile only the processing TU which now contains the pybind11 module
 sources = [PROCESSING_SRC]
