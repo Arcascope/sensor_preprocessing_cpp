@@ -1,6 +1,7 @@
 from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
 import subprocess
+import shutil
 import sys
 import setuptools
 import os
@@ -81,6 +82,16 @@ class SenpyBuildExt(build_ext):
     def run(self):
         ensure_native_artifacts()
         super().run()
+        self._copy_runtime_libraries()
+
+    def _copy_runtime_libraries(self):
+        for ext in self.extensions:
+            ext_path = self.get_ext_fullpath(ext.name)
+            ext_dir = os.path.dirname(ext_path)
+            os.makedirs(ext_dir, exist_ok=True)
+            target_lib = os.path.join(ext_dir, os.path.basename(finufft_lib_so))
+            shutil.copy2(finufft_lib_so, target_lib)
+            print(f"senpy: copied runtime library to {target_lib}", flush=True)
 
 include_dirs.append(finufft_include_dir)
 
@@ -95,7 +106,7 @@ ext_modules = [
             f'-L{finufft_lib_dir}',
             '-lfinufft',
             fftw3_lib, fftw3f_lib,
-            f'-Wl,-rpath,{finufft_lib_dir}',
+            '-Wl,-rpath,$ORIGIN',
             '-lgomp',
         ],
     ),
@@ -110,6 +121,8 @@ setup(
     ext_modules=ext_modules,
     packages=['senpy'],  # Define senpy as a package
     package_dir={'senpy': '.'},  # The senpy package is in the current directory
+    package_data={'senpy': ['*.so']},
+    include_package_data=True,
     py_modules=['senpy', 'senpy.api', "senpy._core"],
     install_requires=['pybind11>=2.6.0', 'numpy>=1.19.0'],
     setup_requires=['pybind11>=2.6.0'],
