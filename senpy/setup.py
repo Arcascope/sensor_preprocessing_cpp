@@ -48,9 +48,11 @@ def artifacts_ready():
 
 def ensure_native_artifacts():
     if artifacts_ready():
+        print("senpy: reusing existing FINUFFT build artifacts", flush=True)
         return
 
     repo_root = os.path.abspath(os.path.join(ROOT_DIR, '..'))
+    print(f"senpy: configuring native build in {BUILD_DIR}", flush=True)
     subprocess.run(
         [
             "cmake",
@@ -61,10 +63,12 @@ def ensure_native_artifacts():
         ],
         check=True,
     )
+    print("senpy: building native artifacts with CMake", flush=True)
     subprocess.run(
-        ["cmake", "--build", BUILD_DIR],
+        ["cmake", "--build", BUILD_DIR, "--parallel"],
         check=True,
     )
+    print("senpy: native artifact build complete", flush=True)
 
     missing = [path for path in required_artifacts() if not os.path.exists(path)]
     if missing:
