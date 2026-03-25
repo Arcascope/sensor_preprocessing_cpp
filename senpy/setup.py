@@ -1,5 +1,6 @@
 from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
+import subprocess
 import sys
 import setuptools
 import os
@@ -39,9 +40,43 @@ finufft_lib_so = os.path.join(finufft_lib_dir, "libfinufft.so")
 fftw3_lib = os.path.join(BUILD_DIR, "_deps/fftw3-build/libfftw3.a")
 fftw3f_lib = os.path.join(BUILD_DIR, "_deps/fftw3f-build/libfftw3f.a")
 
-for p in [finufft_include_dir, finufft_lib_so, fftw3_lib, fftw3f_lib]:
-    if not os.path.exists(p):
-        raise RuntimeError(f"Required finufft build artifact not found: {p}\nRun: cd .. && cmake -S . -B build -DFINUFFT_STATIC_LINKING=OFF && cmake --build build")
+def required_artifacts():
+    return [finufft_include_dir, finufft_lib_so, fftw3_lib, fftw3f_lib]
+
+def artifacts_ready():
+    return all(os.path.exists(path) for path in required_artifacts())
+
+def ensure_native_artifacts():
+    if artifacts_ready():
+        return
+
+    repo_root = os.path.abspath(os.path.join(ROOT_DIR, '..'))
+    subprocess.run(
+        [
+            "cmake",
+            "-S", repo_root,
+            "-B", BUILD_DIR,
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DFINUFFT_STATIC_LINKING=OFF",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["cmake", "--build", BUILD_DIR],
+        check=True,
+    )
+
+    missing = [path for path in required_artifacts() if not os.path.exists(path)]
+    if missing:
+        raise RuntimeError(
+            "Required finufft build artifact not found after CMake build: "
+            + ", ".join(missing)
+        )
+
+class SenpyBuildExt(build_ext):
+    def run(self):
+        ensure_native_artifacts()
+        super().run()
 
 include_dirs.append(finufft_include_dir)
 
@@ -74,7 +109,7 @@ setup(
     py_modules=['senpy', 'senpy.api', "senpy._core"],
     install_requires=['pybind11>=2.6.0', 'numpy>=1.19.0'],
     setup_requires=['pybind11>=2.6.0'],
-    cmdclass={'build_ext': build_ext},
+    cmdclass={'build_ext': SenpyBuildExt},
     zip_safe=False,
     python_requires='>=3.11',
 )
