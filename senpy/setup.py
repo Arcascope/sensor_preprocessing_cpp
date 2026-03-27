@@ -6,6 +6,7 @@ import sys
 import setuptools
 import os
 import glob
+import platform
 
 class get_pybind_include(object):
     """Helper class to determine the pybind11 include path (imported lazily)"""
@@ -37,7 +38,8 @@ except Exception:
 BUILD_DIR = os.path.abspath(os.path.join(ROOT_DIR, '..', 'build'))
 finufft_include_dir = os.path.join(BUILD_DIR, "_deps/finufft-src/include")
 finufft_lib_dir = os.path.join(BUILD_DIR, "_deps/finufft-build/src")
-finufft_lib_so = os.path.join(finufft_lib_dir, "libfinufft.so")
+_lib_ext = "dylib" if platform.system() == "Darwin" else "so"
+finufft_lib_so = os.path.join(finufft_lib_dir, f"libfinufft.{_lib_ext}")
 fftw3_lib = os.path.join(BUILD_DIR, "_deps/fftw3-build/libfftw3.a")
 fftw3f_lib = os.path.join(BUILD_DIR, "_deps/fftw3f-build/libfftw3f.a")
 
@@ -106,8 +108,8 @@ ext_modules = [
             f'-L{finufft_lib_dir}',
             '-lfinufft',
             fftw3_lib, fftw3f_lib,
-            '-Wl,-rpath,$ORIGIN',
-            '-lgomp',
+            '-Wl,-rpath,@loader_path' if platform.system() == 'Darwin' else '-Wl,-rpath,$ORIGIN',
+            '-lomp' if platform.system() == 'Darwin' else '-lgomp',
         ],
     ),
 ]
