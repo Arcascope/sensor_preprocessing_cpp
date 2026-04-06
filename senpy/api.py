@@ -10,14 +10,6 @@ from numpy.typing import NDArray
 # Import the C++ module
 import senpy._core as _senpy
 
-# Try to import finufft; fall back to a slow numpy DFT if unavailable
-try:
-    import finufft
-
-    _HAS_FINUFFT = True
-except ImportError:
-    _HAS_FINUFFT = False
-
 
 # Add a simple test function to verify imports work
 def test_import():
@@ -404,26 +396,6 @@ def resample_accelerometer_cubic_microseconds(
     )
 
 
-# ── NUFFT-based spectrogram (finufft / numpy-DFT backend) ────────
-
-
-def _nufft_type1(x_nonuniform: NDArray[np.float64],
-                 c: NDArray[np.complex128],
-                 n_modes: int) -> NDArray[np.complex128]:
-    """Type-1 NUFFT: non-uniform points → Fourier coefficients.
-
-    Computes  f[k] = sum_j c_j * exp(+i * k * x_j)
-    for k = -n_modes//2 … n_modes//2-1, where x_j ∈ [-pi, pi).
-
-    Uses finufft if available, otherwise falls back to a direct
-    (slow, O(NM)) DFT so that tests can run without finufft installed.
-    """
-    if _HAS_FINUFFT:
-        return finufft.nufft1d1(x_nonuniform, c, n_modes)
-    else:
-        ks = np.arange(n_modes) - n_modes // 2
-        return np.dot(np.exp(1j * np.outer(ks, x_nonuniform)), c)
-
 
 def compute_spectrogram_nufft(
     timestamps: NDArray[np.float64],
@@ -490,6 +462,7 @@ def compute_jerk(
     y: NDArray[np.float64],
     z: NDArray[np.float64],
     ts_unit: str = "s",
+    use_diff: bool = True
 ) -> JerkData:
     """
     Compute jerk (derivative of acceleration) from accelerometer data.
@@ -517,7 +490,7 @@ def compute_jerk(
     # Convert timestamps to microseconds
     timestamps_us = (timestamps * conversion_scalar).astype(np.int64)
 
-    result = compute_jerk_microseconds(timestamps_us, x, y, z)
+    result = compute_jerk_microseconds(timestamps_us, x, y, z, use_diff)
     return result
 
 
@@ -526,6 +499,7 @@ def compute_jerk_microseconds(
     x: NDArray[np.float64],
     y: NDArray[np.float64],
     z: NDArray[np.float64],
+    diff: bool
 ) -> JerkData:
     """
     Compute jerk (derivative of acceleration) from accelerometer data.
@@ -545,7 +519,7 @@ def compute_jerk_microseconds(
     if not (len(timestamps) == len(x) == len(y) == len(z)):
         raise ValueError("All input arrays must have the same length")
 
-    result = _senpy.compute_jerk(timestamps, x, y, z)
+    result = _senpy.compute_jerk(timestamps, x, y, z, diff=diff)
     return JerkData(timestamps_us=result["timestamps"], jerk=result["jerk"])
 
 

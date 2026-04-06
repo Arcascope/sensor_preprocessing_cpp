@@ -1244,7 +1244,8 @@ public:
 
     static std::pair<std::vector<long>, std::vector<double>> computeJerk(
         const std::vector<long> &timestamps,
-        const std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> &accelerometerData)
+        const std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> &accelerometerData,
+        bool diff = true)
     {
         const auto &[x, y, z] = accelerometerData;
         size_t numSamples = x.size();
@@ -1264,9 +1265,9 @@ public:
         // Jerk computation (derivative of acceleration) starting from index 1
         for (size_t i = 1; i < numSamples; i++)
         {
-            double dvx = (x[i] - x[i - 1]);
-            double dvy = (y[i] - y[i - 1]);
-            double dvz = (z[i] - z[i - 1]);
+            double dvx = diff ? (x[i] - x[i - 1]) : x[i];
+            double dvy = diff ? (y[i] - y[i - 1]) : y[i];
+            double dvz = diff ? (z[i] - z[i - 1]) : z[i];
             jerkOut[i] = std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
             jerkTimes[i] = timestamps[i]; // Use timestamp of current sample
         }
@@ -1389,7 +1390,7 @@ extern "C"
         return output;
     }
 
-    double *compute_jerk(int64_t *timestamps, double *x, double *y, double *z, int length, int *outLength)
+    double *compute_jerk(int64_t *timestamps, double *x, double *y, double *z, int length, bool diff, int *outLength)
     {
         std::vector<long> ts(length);
         for (int i = 0; i < length; i++)
@@ -1399,7 +1400,7 @@ extern "C"
         std::vector<double> az(z, z + length);
 
         auto accelerometerData = std::make_tuple(ax, ay, az);
-        auto result = SensorProcessor::computeJerk(ts, accelerometerData);
+        auto result = SensorProcessor::computeJerk(ts, accelerometerData, diff);
         const auto &jerkValues = result.second;
 
         *outLength = jerkValues.size();
@@ -1616,7 +1617,8 @@ py::dict computeJerk_wrapper(
     py::array_t<int64_t> timestamps,
     py::array_t<double> x,
     py::array_t<double> y,
-    py::array_t<double> z)
+    py::array_t<double> z,
+    bool diff = true)
 {
     auto ts_buf = timestamps.request();
     auto x_buf = x.request();
@@ -1638,7 +1640,7 @@ py::dict computeJerk_wrapper(
                               static_cast<double *>(z_buf.ptr) + z_buf.size);
 
     auto accelerometerData = std::make_tuple(x_vec, y_vec, z_vec);
-    auto result = SensorProcessor::computeJerk(ts_vec, accelerometerData);
+    auto result = SensorProcessor::computeJerk(ts_vec, accelerometerData, diff);
 
     py::array_t<int64_t> out_timestamps(result.first.size());
     py::array_t<double> out_jerk(result.second.size());
@@ -2050,7 +2052,8 @@ PYBIND11_MODULE(_core, m)
           py::arg("timestamps"),
           py::arg("x"),
           py::arg("y"),
-          py::arg("z"));
+          py::arg("z"),
+          py::arg("diff") = true);
 
     m.def("compute_magnitude", &computeMagnitude_wrapper,
           "Compute magnitude from x, y, z components",
