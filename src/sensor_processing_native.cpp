@@ -4,6 +4,7 @@
 #include <vector>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <algorithm>
 #include <numeric>
 
@@ -305,13 +306,36 @@ public:
         if (timestamps.size() != signal.size())
             throw std::runtime_error("timestamps and signal must have the same length");
 
+        if (timestamps.size() < 2)
+            throw std::runtime_error("compute_spectrogram_nufft requires at least two timestamps");
+
+        if (!(secperseg > 0.0))
+            throw std::runtime_error("secperseg must be > 0");
+
+        if (secoverlap < 0.0 || secoverlap >= secperseg)
+            throw std::runtime_error("secoverlap must satisfy 0 <= secoverlap < secperseg");
+
+        if (target_fs < 0.0)
+            throw std::runtime_error("target_fs must be >= 0");
+
         // Estimate median sampling rate
         std::vector<double> diffs;
+        diffs.reserve(timestamps.size() - 1);
         for (size_t i = 1; i < timestamps.size(); ++i)
-            diffs.push_back(timestamps[i] - timestamps[i-1]);
+        {
+            double dt = timestamps[i] - timestamps[i - 1];
+            if (std::isfinite(dt) && dt > 0.0)
+                diffs.push_back(dt);
+        }
+
+        if (diffs.empty())
+            throw std::runtime_error("timestamps must contain at least one positive time step");
 
         std::sort(diffs.begin(), diffs.end());
         double dt_median = diffs[diffs.size() / 2];
+        if (!(dt_median > 0.0) || !std::isfinite(dt_median))
+            throw std::runtime_error("median timestamp spacing must be finite and > 0");
+
         double median_fs = 1.0 / dt_median;
 
         // Window duration and hop in seconds (input is already in seconds)
@@ -320,6 +344,9 @@ public:
 
         // Compute nfft based on actual window duration and median sampling rate
         int nfft = (int)(secperseg * median_fs);
+        if (nfft < 2)
+            throw std::runtime_error("secperseg is too short for the observed sampling density");
+
         // Round up to next power of 2 for efficiency
         int nfft_padded = nfft;
         {
@@ -328,8 +355,8 @@ public:
             nfft_padded = p;
         }
 
-        // Frequency axis for positive frequencies
-        int n_pos_freqs = nfft_padded / 2;
+        // Frequency axis for positive frequencies, including the Nyquist-equivalent bin.
+        int n_pos_freqs = nfft_padded / 2 + 1;
         std::vector<double> freqs(n_pos_freqs);
         for (int i = 0; i < n_pos_freqs; ++i)
             freqs[i] = i / win_dur;
@@ -433,11 +460,17 @@ public:
 
             ier = finufft_setpts(plan, (int64_t)t_win.size(), x.data(), nullptr, nullptr, 0, nullptr, nullptr, nullptr);
             if (ier != 0)
+            {
+                finufft_destroy(plan);
                 throw std::runtime_error("finufft_setpts failed");
+            }
 
             ier = finufft_execute(plan, c_complex.data(), fhat_complex.data());
             if (ier != 0)
+            {
+                finufft_destroy(plan);
                 throw std::runtime_error("finufft_execute failed");
+            }
 
             finufft_destroy(plan);
 
@@ -451,10 +484,9 @@ public:
             {
                 // Match computeSpectrogram: magnitude / sqrt(fs * Σw²)
                 double scale_factor = 1.0 / std::sqrt(median_fs * win_ss);
-                // Positive half starts at index nfft_padded/2
                 for (int k = 0; k < n_pos_freqs; ++k)
                 {
-                    int idx = nfft_padded / 2 + k;
+                    int idx = (k == n_pos_freqs - 1) ? 0 : (nfft_padded / 2 + k);
                     double real = fhat_complex[idx].real();
                     double imag = fhat_complex[idx].imag();
                     psd[k] = std::sqrt(real * real + imag * imag) * scale_factor;
@@ -1026,8 +1058,8 @@ public:
         return watch_freq_sum;
     }
 
-    static std::pair<std::vector<long>, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>> resampleAccelerometer(
-        const std::vector<long> &timestamps,
+    static std::pair<std::vector<std::int64_t>, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>> resampleAccelerometer(
+        const std::vector<std::int64_t> &timestamps,
         const std::vector<double> &x,
         const std::vector<double> &y,
         const std::vector<double> &z,
@@ -1036,12 +1068,12 @@ public:
         size_t n = timestamps.size();
         if (n < 2)
         {
-            return {std::vector<long>(), std::make_tuple(std::vector<double>(), std::vector<double>(), std::vector<double>())};
+            return {std::vector<std::int64_t>(), std::make_tuple(std::vector<double>(), std::vector<double>(), std::vector<double>())};
         }
 
         // Timestamps are in microseconds
-        long startTimeUs = timestamps.front();
-        long endTimeUs = timestamps.back();
+        std::int64_t startTimeUs = timestamps.front();
+        std::int64_t endTimeUs = timestamps.back();
 
         // Calculate number of samples needed
         double durationSec = (endTimeUs - startTimeUs) / 1000000.0;
@@ -1049,7 +1081,7 @@ public:
         if (numSamples < 1)
             numSamples = 1;
 
-        std::vector<long> resampledTime(numSamples);
+        std::vector<std::int64_t> resampledTime(numSamples);
         std::vector<double> rx(numSamples), ry(numSamples), rz(numSamples);
 
         // Generate new time points in microseconds
@@ -1063,7 +1095,7 @@ public:
             else
             {
                 // Generate evenly spaced time points at target frequency
-                resampledTime[i] = startTimeUs + static_cast<long>(i * intervalUs);
+                resampledTime[i] = startTimeUs + static_cast<std::int64_t>(i * intervalUs);
             }
         }
 
@@ -1071,7 +1103,7 @@ public:
 
         for (int i = 0; i < numSamples; ++i)
         {
-            long t = resampledTime[i];
+            std::int64_t t = resampledTime[i];
 
             // Handle extrapolation cases first
             if (t <= timestamps[0])
@@ -1218,9 +1250,9 @@ public:
     }
 
     // ── Cubic-spline resampling ───────────────────────────────────────
-    static std::pair<std::vector<long>, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>>
+    static std::pair<std::vector<std::int64_t>, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>>
     resampleAccelerometerCubic(
-        const std::vector<long> &timestamps,
+        const std::vector<std::int64_t> &timestamps,
         const std::vector<double> &x,
         const std::vector<double> &y,
         const std::vector<double> &z,
@@ -1229,11 +1261,11 @@ public:
         size_t n = timestamps.size();
         if (n < 2)
         {
-            return {std::vector<long>(), std::make_tuple(std::vector<double>(), std::vector<double>(), std::vector<double>())};
+            return {std::vector<std::int64_t>(), std::make_tuple(std::vector<double>(), std::vector<double>(), std::vector<double>())};
         }
 
-        long startTimeUs = timestamps.front();
-        long endTimeUs = timestamps.back();
+        std::int64_t startTimeUs = timestamps.front();
+        std::int64_t endTimeUs = timestamps.back();
         double durationSec = (endTimeUs - startTimeUs) / 1000000.0;
         int numSamples = static_cast<int>(durationSec * targetFs);
         if (numSamples < 1)
@@ -1241,11 +1273,11 @@ public:
 
         // Build uniform output time grid (microseconds)
         double intervalUs = 1000000.0 / targetFs;
-        std::vector<long> resampledTime(numSamples);
+        std::vector<std::int64_t> resampledTime(numSamples);
         std::vector<double> queryT(numSamples);
         for (int i = 0; i < numSamples; ++i)
         {
-            resampledTime[i] = startTimeUs + static_cast<long>(i * intervalUs);
+            resampledTime[i] = startTimeUs + static_cast<std::int64_t>(i * intervalUs);
             queryT[i] = static_cast<double>(resampledTime[i]);
         }
 
@@ -1267,8 +1299,8 @@ public:
         return {resampledTime, std::make_tuple(rx, ry, rz)};
     }
 
-    static std::pair<std::vector<long>, std::vector<double>> computeJerk(
-        const std::vector<long> &timestamps,
+    static std::pair<std::vector<std::int64_t>, std::vector<double>> computeJerk(
+        const std::vector<std::int64_t> &timestamps,
         const std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> &accelerometerData,
         bool diff = true)
     {
@@ -1277,10 +1309,10 @@ public:
 
         if (numSamples < 2)
         {
-            return {std::vector<long>(), std::vector<double>()};
+            return {std::vector<std::int64_t>(), std::vector<double>()};
         }
 
-        std::vector<long> jerkTimes(numSamples);
+        std::vector<std::int64_t> jerkTimes(numSamples);
         std::vector<double> jerkOut(numSamples);
 
         // First value is 0 (matching Python behavior)
@@ -1379,7 +1411,7 @@ extern "C"
 {
     void *resample_accelerometer(int64_t *timestamps, double *x, double *y, double *z, int length, double targetFs, int *outLength)
     {
-        std::vector<long> ts(length);
+        std::vector<std::int64_t> ts(length);
         for (int i = 0; i < length; i++)
             ts[i] = timestamps[i];
         std::vector<double> ax(x, x + length);
@@ -1417,7 +1449,7 @@ extern "C"
 
     double *compute_jerk(int64_t *timestamps, double *x, double *y, double *z, int length, bool diff, int *outLength)
     {
-        std::vector<long> ts(length);
+        std::vector<std::int64_t> ts(length);
         for (int i = 0; i < length; i++)
             ts[i] = timestamps[i];
         std::vector<double> ax(x, x + length);
@@ -1555,8 +1587,8 @@ py::dict resampleAccelerometer_wrapper(
         throw std::runtime_error("Input arrays must have the same length");
     }
 
-    std::vector<long> ts_vec(static_cast<long *>(ts_buf.ptr),
-                             static_cast<long *>(ts_buf.ptr) + ts_buf.size);
+    std::vector<std::int64_t> ts_vec(static_cast<std::int64_t *>(ts_buf.ptr),
+                                     static_cast<std::int64_t *>(ts_buf.ptr) + ts_buf.size);
     std::vector<double> x_vec(static_cast<double *>(x_buf.ptr),
                               static_cast<double *>(x_buf.ptr) + x_buf.size);
     std::vector<double> y_vec(static_cast<double *>(y_buf.ptr),
@@ -1605,8 +1637,8 @@ py::dict resampleAccelerometerCubic_wrapper(
         throw std::runtime_error("Input arrays must have the same length");
     }
 
-    std::vector<long> ts_vec(static_cast<long *>(ts_buf.ptr),
-                             static_cast<long *>(ts_buf.ptr) + ts_buf.size);
+    std::vector<std::int64_t> ts_vec(static_cast<std::int64_t *>(ts_buf.ptr),
+                                     static_cast<std::int64_t *>(ts_buf.ptr) + ts_buf.size);
     std::vector<double> x_vec(static_cast<double *>(x_buf.ptr),
                               static_cast<double *>(x_buf.ptr) + x_buf.size);
     std::vector<double> y_vec(static_cast<double *>(y_buf.ptr),
@@ -1655,8 +1687,8 @@ py::dict computeJerk_wrapper(
         throw std::runtime_error("Input arrays must have the same length");
     }
 
-    std::vector<long> ts_vec(static_cast<long *>(ts_buf.ptr),
-                             static_cast<long *>(ts_buf.ptr) + ts_buf.size);
+    std::vector<std::int64_t> ts_vec(static_cast<std::int64_t *>(ts_buf.ptr),
+                                     static_cast<std::int64_t *>(ts_buf.ptr) + ts_buf.size);
     std::vector<double> x_vec(static_cast<double *>(x_buf.ptr),
                               static_cast<double *>(x_buf.ptr) + x_buf.size);
     std::vector<double> y_vec(static_cast<double *>(y_buf.ptr),
@@ -1801,6 +1833,12 @@ py::dict computeSpectrogramNUFFT_wrapper(
 {
     auto ts_buf = timestamps.request();
     auto sig_buf = signal.request();
+
+    if (ts_buf.size != sig_buf.size)
+    {
+        throw std::runtime_error("timestamps and signal must have the same length");
+    }
+
     std::vector<double> timestamps_vec(static_cast<double *>(ts_buf.ptr),
                                        static_cast<double *>(ts_buf.ptr) + ts_buf.size);
     std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),

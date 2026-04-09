@@ -16,20 +16,14 @@ include_directories(${CPP_DIR})
 # Find pybind11
 find_package(pybind11 REQUIRED)
 
-# Finufft configuration
-# These paths can be provided by the user or a parent CMake project.
+# FINUFFT is required for senpy builds.
 set(FINUFFT_INCLUDE_DIR "" CACHE PATH "Path to FINUFFT headers")
 set(FINUFFT_LIB "" CACHE FILEPATH "Path to the FINUFFT static library")
 set(FFTW3_LIB "" CACHE FILEPATH "Path to the FFTW3 static library")
 set(FFTW3F_LIB "" CACHE FILEPATH "Path to the FFTW3F static library")
 
-if(EXISTS "${FINUFFT_INCLUDE_DIR}" AND EXISTS "${FINUFFT_LIB}")
-    message(STATUS "Finufft found at ${FINUFFT_LIB}")
-    set(USE_FINUFFT ON)
-    add_definitions(-DUSE_FINUFFT)
-else()
-    message(STATUS "Finufft not found, building without NUFFT support")
-    set(USE_FINUFFT OFF)
+if(NOT EXISTS "${FINUFFT_INCLUDE_DIR}" OR NOT EXISTS "${FINUFFT_LIB}" OR NOT EXISTS "${FFTW3_LIB}" OR NOT EXISTS "${FFTW3F_LIB}")
+    message(FATAL_ERROR "FINUFFT and FFTW artifacts are required to build senpy")
 endif()
 
 # Create the Python module with the new name
@@ -43,17 +37,11 @@ set_target_properties(_core PROPERTIES OUTPUT_NAME "_core")
 # expose include directory to the target
 target_include_directories(_core PRIVATE ${CPP_DIR})
 
-# Add finufft include directory if available
-if(USE_FINUFFT)
-    target_include_directories(_core PRIVATE ${FINUFFT_INCLUDE_DIR})
-endif()
+# Add required FINUFFT include directory
+target_include_directories(_core PRIVATE ${FINUFFT_INCLUDE_DIR})
 
-# Link against necessary libraries
-if(USE_FINUFFT)
-    target_link_libraries(_core PRIVATE ${FINUFFT_LIB} ${FFTW3_LIB} ${FFTW3F_LIB} m gomp)
-else()
-    target_link_libraries(_core PRIVATE)
-endif()
+# Link against required libraries
+target_link_libraries(_core PRIVATE ${FINUFFT_LIB} ${FFTW3_LIB} ${FFTW3F_LIB} m gomp)
 
 # Set RPATH for the module
 set_target_properties(_core PROPERTIES

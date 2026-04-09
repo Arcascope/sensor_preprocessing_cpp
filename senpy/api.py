@@ -432,9 +432,26 @@ def compute_spectrogram_nufft(
     Returns:
         SpectrogramResult with *frequencies* (Hz), *times* (s), and
         *Sxx* power spectral density array shaped ``(n_times, n_freqs)``.
+
+    Notes:
+        ``secperseg`` and ``secoverlap`` are durations, not sample counts.
+        This API is intentionally time-based because the input timestamps are
+        non-uniform.
     """
     if len(timestamps) != len(signal):
         raise ValueError("timestamps and signal must have the same length")
+
+    if len(timestamps) < 2:
+        raise ValueError("compute_spectrogram_nufft requires at least two timestamps")
+
+    if secperseg <= 0:
+        raise ValueError("secperseg must be > 0")
+
+    if secoverlap < 0 or secoverlap >= secperseg:
+        raise ValueError("secoverlap must satisfy 0 <= secoverlap < secperseg")
+
+    if target_fs is not None and target_fs < 0:
+        raise ValueError("target_fs must be >= 0")
 
     # Convert timestamps to seconds if needed
     conversion = {"s": 1.0, "ms": 1e-3, "us": 1e-6}.get(ts_unit, 1.0)

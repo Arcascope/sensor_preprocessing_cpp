@@ -8,3 +8,4 @@ __pycache__/*
 *.egg-info
 senpy/_core.*
 senpy/*.so
+senpy/*.dylib
