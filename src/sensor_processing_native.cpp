@@ -343,19 +343,44 @@ public:
 
         // Sliding window loop
         double win_start = t_start;
+        // Use two-pointer indices to avoid rescanning timestamps for every window
+        size_t start_idx = 0;
+        size_t end_idx = 0;
+        const size_t n = timestamps.size();
         while (win_start + win_dur <= t_end + dt_median)
         {
+            if (start_idx >= n)
+            {
+                // No more samples available for subsequent windows
+                break;
+            }
+
             double win_end = win_start + win_dur;
 
-            // Select samples in window
-            std::vector<double> t_win, s_win;
-            for (size_t i = 0; i < timestamps.size(); ++i)
+            // Advance start_idx to the first sample >= win_start
+            while (start_idx < n && timestamps[start_idx] < win_start)
             {
-                if (timestamps[i] >= win_start && timestamps[i] < win_end)
-                {
-                    t_win.push_back(timestamps[i]);
-                    s_win.push_back(signal[i]);
-                }
+                ++start_idx;
+            }
+
+            // Ensure end_idx is at least start_idx, then advance to first sample >= win_end
+            if (end_idx < start_idx)
+            {
+                end_idx = start_idx;
+            }
+            while (end_idx < n && timestamps[end_idx] < win_end)
+            {
+                ++end_idx;
+            }
+
+            // Select samples in window [start_idx, end_idx)
+            std::vector<double> t_win, s_win;
+            t_win.reserve(end_idx > start_idx ? (end_idx - start_idx) : 0);
+            s_win.reserve(end_idx > start_idx ? (end_idx - start_idx) : 0);
+            for (size_t i = start_idx; i < end_idx; ++i)
+            {
+                t_win.push_back(timestamps[i]);
+                s_win.push_back(signal[i]);
             }
 
             if (t_win.size() < 4)
