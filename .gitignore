@@ -7,3 +7,4 @@ __pycache__/*
 *.pyd
 *.egg-info
 senpy/_core.*
+senpy/*.so
