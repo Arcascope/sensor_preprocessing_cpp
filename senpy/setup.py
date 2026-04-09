@@ -124,7 +124,7 @@ setup(
     ext_modules=ext_modules,
     packages=['senpy'],  # Define senpy as a package
     package_dir={'senpy': '.'},  # The senpy package is in the current directory
-    package_data={'senpy': ['*.so']},
+    package_data={'senpy': ['*.so', '*.dylib', '*.dll']},
     include_package_data=True,
     py_modules=['senpy', 'senpy.api', "senpy._core"],
     install_requires=['pybind11>=2.6.0', 'numpy>=1.19.0'],

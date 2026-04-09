@@ -21,7 +21,6 @@ from numpy.typing import NDArray
 from senpy.api import (
     resample_accelerometer,
     resample_accelerometer_cubic,
-    resample_accelerometer_nufft,
     compute_spectrogram,
     compute_spectrogram_nufft,
     compute_magnitude,
@@ -58,6 +57,19 @@ def spectrogram_band_power(spec, fmin: float, fmax: float) -> float:
     """Mean power in [fmin, fmax] across all time windows."""
     mask = (spec.frequencies >= fmin) & (spec.frequencies <= fmax)
     return float(np.mean(spec.Sxx[:, mask]))
+
+
+def window_seconds_from_samples(
+    timestamps_s: NDArray[np.float64], nperseg: int, noverlap: int
+) -> tuple[float, float]:
+    """Convert sample-count windows to time windows using the median positive dt."""
+    dt = np.diff(timestamps_s)
+    valid_dt = dt[(dt > 0) & np.isfinite(dt)]
+    if valid_dt.size == 0:
+        raise ValueError("timestamps must include at least one positive time step")
+
+    median_dt = float(np.median(valid_dt))
+    return nperseg * median_dt, noverlap * median_dt
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -259,8 +271,9 @@ class TestNufftSpectrogram:
         t, signal = self._make_known_spectrum()
         nperseg = 256
         noverlap = 128
+        secperseg, secoverlap = window_seconds_from_samples(t, nperseg, noverlap)
 
-        spec = compute_spectrogram_nufft(t, signal, nperseg, noverlap)
+        spec = compute_spectrogram_nufft(t, signal, secperseg, secoverlap)
         mean_psd = np.mean(spec.Sxx, axis=0)
 
         # Find the peak frequency within each expected band
@@ -292,9 +305,10 @@ class TestNufftSpectrogram:
         signal = np.sin(2 * np.pi * 15.0 * t)
         nperseg = 256
         noverlap = 128
+        secperseg, secoverlap = window_seconds_from_samples(t, nperseg, noverlap)
 
         # NUFFT spectrogram: directly from non-uniform samples
-        spec_nufft = compute_spectrogram_nufft(t, signal, nperseg, noverlap)
+        spec_nufft = compute_spectrogram_nufft(t, signal, secperseg, secoverlap)
         nufft_leak = spectrogram_band_power(spec_nufft, 0.5, 10.0)
         nufft_tone = spectrogram_band_power(spec_nufft, 14.0, 16.0)
 
@@ -339,7 +353,9 @@ class TestNufftSpectrogram:
         signal = (np.sin(2 * np.pi * 3.0 * t)
                   + 0.5 * np.sin(2 * np.pi * 7.0 * t))
 
-        spec = compute_spectrogram_nufft(t, signal, 256, 128)
+        secperseg, secoverlap = window_seconds_from_samples(t, 256, 128)
+
+        spec = compute_spectrogram_nufft(t, signal, secperseg, secoverlap)
         mean_psd = np.mean(spec.Sxx, axis=0)
 
         mask_3 = (spec.frequencies >= 2.0) & (spec.frequencies <= 4.0)
@@ -403,7 +419,8 @@ class TestRealDataSpectrogram:
             pytest.skip(f"{name}: not enough data")
 
         mag = compute_magnitude(x, y, z)
-        spec = compute_spectrogram_nufft(t, mag, 256, 128)
+        secperseg, secoverlap = window_seconds_from_samples(t, 256, 128)
+        spec = compute_spectrogram_nufft(t, mag, secperseg, secoverlap)
 
         print(f"\n  [nufft, {name}] shape={spec.Sxx.shape}"
               f"  freq_range=[{spec.frequencies[0]:.2f}, {spec.frequencies[-1]:.2f}]"

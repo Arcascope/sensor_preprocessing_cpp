@@ -75,9 +75,8 @@ target_include_directories(sensor_processing PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# Link finufft and enable its include guard in the source
+# Link required FINUFFT dependency
 target_link_libraries(sensor_processing PRIVATE finufft)
-target_compile_definitions(sensor_processing PRIVATE USE_FINUFFT)
 
 # Platform-specific settings
 if(ANDROID)
