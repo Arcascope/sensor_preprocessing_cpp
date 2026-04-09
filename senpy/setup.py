@@ -18,8 +18,9 @@ class get_pybind_include(object):
 ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
 CPP_DIR = os.path.abspath(os.path.join(ROOT_DIR, '..', 'src'))
 
-# explicit binding file in this directory
-PROCESSING_SRC = os.path.join('..', 'src', 'sensor_processing_native.cpp')
+# explicit binding file in this directory — must stay as a plain relative string
+# (setuptools rejects absolute paths; os.path.abspath would break in pip's temp build dir)
+PROCESSING_SRC = '../src/sensor_processing_native.cpp'
 
 # ensure we compile only the processing TU which now contains the pybind11 module
 sources = [PROCESSING_SRC]
