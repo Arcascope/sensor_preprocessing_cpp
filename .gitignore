@@ -9,3 +9,4 @@ __pycache__/*
 senpy/_core.*
 senpy/*.so
 senpy/*.dylib
+senpy/.venv
