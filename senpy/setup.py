@@ -36,7 +36,7 @@ except Exception:
     pass
 
 # Finufft built by the top-level CMake into build/_deps/
-BUILD_DIR = os.path.abspath(os.path.join(ROOT_DIR, '..', 'build'))
+BUILD_DIR = os.path.join(ROOT_DIR, '..', 'build')
 finufft_include_dir = os.path.join(BUILD_DIR, "_deps/finufft-src/include")
 finufft_lib_dir = os.path.join(BUILD_DIR, "_deps/finufft-build/src")
 _lib_ext = "dylib" if platform.system() == "Darwin" else "so"
@@ -55,7 +55,7 @@ def ensure_native_artifacts():
         print("senpy: reusing existing FINUFFT build artifacts", flush=True)
         return
 
-    repo_root = os.path.abspath(os.path.join(ROOT_DIR, '..'))
+    repo_root = os.path.join(ROOT_DIR, '..')
     print(f"senpy: configuring native build in {BUILD_DIR}", flush=True)
     subprocess.run(
         [
