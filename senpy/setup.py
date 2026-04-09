@@ -15,8 +15,8 @@ class get_pybind_include(object):
         return pybind11.get_include()
 
 # resolve directories relative to this file
-ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
-CPP_DIR = os.path.abspath(os.path.join(ROOT_DIR, '..', 'src'))
+ROOT_DIR = os.path.dirname(__file__)
+CPP_DIR = os.path.join(ROOT_DIR, '..', 'src')
 
 # explicit binding file in this directory — must stay as a plain relative string
 # (setuptools rejects absolute paths; os.path.abspath would break in pip's temp build dir)
