@@ -17,10 +17,11 @@ include_directories(${CPP_DIR})
 find_package(pybind11 REQUIRED)
 
 # Finufft configuration
-set(FINUFFT_INCLUDE_DIR "/tmp/finufft/include")
-set(FINUFFT_LIB "/tmp/finufft/build/src/libfinufft.a")
-set(FFTW3_LIB "/tmp/finufft/build/_deps/fftw3-build/libfftw3.a")
-set(FFTW3F_LIB "/tmp/finufft/build/_deps/fftw3f-build/libfftw3f.a")
+# These paths can be provided by the user or a parent CMake project.
+set(FINUFFT_INCLUDE_DIR "" CACHE PATH "Path to FINUFFT headers")
+set(FINUFFT_LIB "" CACHE FILEPATH "Path to the FINUFFT static library")
+set(FFTW3_LIB "" CACHE FILEPATH "Path to the FFTW3 static library")
+set(FFTW3F_LIB "" CACHE FILEPATH "Path to the FFTW3F static library")
 
 if(EXISTS "${FINUFFT_INCLUDE_DIR}" AND EXISTS "${FINUFFT_LIB}")
     message(STATUS "Finufft found at ${FINUFFT_LIB}")
