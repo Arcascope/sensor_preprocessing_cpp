@@ -335,12 +335,151 @@ def resample_accelerometer_microseconds(
     )
 
 
+# ── Cubic-spline resampling (C++ backend) ─────────────────────────
+
+
+def resample_accelerometer_cubic(
+    timestamps: NDArray[np.float64],
+    x: NDArray[np.float64],
+    y: NDArray[np.float64],
+    z: NDArray[np.float64],
+    target_fs: float,
+    ts_unit: str = "s",
+) -> AccelerometerData:
+    """Resample accelerometer data using natural cubic spline interpolation.
+
+    Same interface as ``resample_accelerometer`` but uses C3-continuous
+    cubic splines instead of piecewise-linear interpolation, giving much
+    better high-frequency rolloff (sinc^4-like vs sinc^2).
+
+    Args:
+        timestamps: Sample timestamps.
+        x, y, z: Acceleration components.
+        target_fs: Target sampling frequency in Hz.
+        ts_unit: Timestamp unit — ``'s'``, ``'ms'``, or ``'us'``.
+
+    Returns:
+        AccelerometerData on a uniform grid at *target_fs*.
+    """
+    if not (len(timestamps) == len(x) == len(y) == len(z)):
+        raise ValueError("All input arrays must have the same length")
+
+    conversion_scalar = {"s": 1e6, "ms": 1e3, "us": 1.0}.get(ts_unit, 1e6)
+    timestamps_us = (timestamps * conversion_scalar).astype(np.int64)
+
+    result = _senpy.resample_accelerometer_cubic(timestamps_us, x, y, z, target_fs)
+    return AccelerometerData(
+        timestamps_us=result["timestamps"],
+        x=result["x"],
+        y=result["y"],
+        z=result["z"],
+    )
+
+
+def resample_accelerometer_cubic_microseconds(
+    timestamps: NDArray[np.int64],
+    x: NDArray[np.float64],
+    y: NDArray[np.float64],
+    z: NDArray[np.float64],
+    target_fs: float,
+) -> AccelerometerData:
+    """Cubic-spline resampling with microsecond timestamps."""
+    if not (len(timestamps) == len(x) == len(y) == len(z)):
+        raise ValueError("All input arrays must have the same length")
+
+    result = _senpy.resample_accelerometer_cubic(timestamps, x, y, z, target_fs)
+    return AccelerometerData(
+        timestamps_us=result["timestamps"],
+        x=result["x"],
+        y=result["y"],
+        z=result["z"],
+    )
+
+
+
+def compute_spectrogram_nufft(
+    timestamps: NDArray[np.float64],
+    signal: NDArray[np.float64],
+    secperseg: float,
+    secoverlap: float,
+    ts_unit: str = "s",
+    target_fs: Optional[float] = None,
+) -> SpectrogramResult:
+    """Compute a spectrogram directly from non-uniformly sampled data
+    using the Non-Uniform FFT, bypassing time-domain resampling entirely.
+
+    For each STFT window the algorithm:
+
+    1. Selects the non-uniform samples falling within the window (fixed duration in seconds).
+    2. Applies a Hann window evaluated at the true sample times.
+    3. Computes the spectrum via type-1 NUFFT using finufft (via C++ backend).
+    4. Interpolates to a common frequency grid (if target_fs is specified).
+
+    Because no resampling interpolation is involved, the result is free
+    of the spectral artifacts that linear or spline resampling introduce
+    into the 0–10 Hz band.
+
+    Args:
+        timestamps: Sample timestamps (same length as *signal*).
+        signal: 1-D signal values (e.g. jerk magnitude).
+        secperseg: Window duration in seconds.
+        secoverlap: Overlap duration in seconds.
+        ts_unit: Timestamp unit — ``'s'``, ``'ms'``, or ``'us'``.
+        target_fs: If specified, interpolate output to a fixed frequency grid
+                   with this sampling rate. Frequency spacing will be 1/secperseg.
+                   Fmax will be target_fs/2.
+
+    Returns:
+        SpectrogramResult with *frequencies* (Hz), *times* (s), and
+        *Sxx* power spectral density array shaped ``(n_times, n_freqs)``.
+
+    Notes:
+        ``secperseg`` and ``secoverlap`` are durations, not sample counts.
+        This API is intentionally time-based because the input timestamps are
+        non-uniform.
+    """
+    if len(timestamps) != len(signal):
+        raise ValueError("timestamps and signal must have the same length")
+
+    if len(timestamps) < 2:
+        raise ValueError("compute_spectrogram_nufft requires at least two timestamps")
+
+    if secperseg <= 0:
+        raise ValueError("secperseg must be > 0")
+
+    if secoverlap < 0 or secoverlap >= secperseg:
+        raise ValueError("secoverlap must satisfy 0 <= secoverlap < secperseg")
+
+    if target_fs is not None and target_fs < 0:
+        raise ValueError("target_fs must be >= 0")
+
+    # Convert timestamps to seconds if needed
+    conversion = {"s": 1.0, "ms": 1e-3, "us": 1e-6}.get(ts_unit, 1.0)
+    t = timestamps.astype(np.float64) * conversion
+
+    # Call C++ backend with optional target_fs for resampling
+    target_fs_val = target_fs if target_fs is not None else 0.0
+
+    try:
+        result_dict = _senpy.compute_spectrogram_nufft(
+            t, signal.astype(np.float64), secperseg, secoverlap, target_fs_val
+        )
+        return SpectrogramResult(
+            frequencies=result_dict["freqs"],
+            times=result_dict["times"],
+            Sxx=result_dict["Sxx"]
+        )
+    except RuntimeError as e:
+        raise RuntimeError(f"C++ NUFFT computation failed: {e}")
+
+
 def compute_jerk(
     timestamps: NDArray[np.float64],
     x: NDArray[np.float64],
     y: NDArray[np.float64],
     z: NDArray[np.float64],
     ts_unit: str = "s",
+    use_diff: bool = True
 ) -> JerkData:
     """
     Compute jerk (derivative of acceleration) from accelerometer data.
@@ -368,7 +507,7 @@ def compute_jerk(
     # Convert timestamps to microseconds
     timestamps_us = (timestamps * conversion_scalar).astype(np.int64)
 
-    result = compute_jerk_microseconds(timestamps_us, x, y, z)
+    result = compute_jerk_microseconds(timestamps_us, x, y, z, use_diff)
     return result
 
 
@@ -377,6 +516,7 @@ def compute_jerk_microseconds(
     x: NDArray[np.float64],
     y: NDArray[np.float64],
     z: NDArray[np.float64],
+    diff: bool
 ) -> JerkData:
     """
     Compute jerk (derivative of acceleration) from accelerometer data.
@@ -396,7 +536,7 @@ def compute_jerk_microseconds(
     if not (len(timestamps) == len(x) == len(y) == len(z)):
         raise ValueError("All input arrays must have the same length")
 
-    result = _senpy.compute_jerk(timestamps, x, y, z)
+    result = _senpy.compute_jerk(timestamps, x, y, z, diff=diff)
     return JerkData(timestamps_us=result["timestamps"], jerk=result["jerk"])
 
 
@@ -756,6 +896,9 @@ __all__ = [
     "ShortTimeFTResult",
     "MotionFeatures",
     "resample_accelerometer",
+    "resample_accelerometer_cubic",
+    "resample_accelerometer_cubic_microseconds",
+    "compute_spectrogram_nufft",
     "compute_jerk",
     "compute_magnitude",
     "compute_spectrogram",

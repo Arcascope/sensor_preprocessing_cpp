@@ -4,8 +4,11 @@
 #include <vector>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <algorithm>
 #include <numeric>
+
+#include <finufft.h>
 
 // Logging macros for Android
 // #define LOG_TAG "SensorProcessing"
@@ -286,6 +289,264 @@ public:
 
             result.times[seg] = (start + nperseg / 2.0) / fs; // center time in sec
         }
+        return result;
+    }
+
+    // Compute spectrogram from non-uniformly sampled data using NUFFT
+    // Bypasses resampling to avoid spectral artifacts in the 0-10 Hz band
+    // secperseg and secoverlap are in seconds (not samples)
+    // target_fs: if > 0, resample output to fixed freq grid (fmax = target_fs/2, spacing = 1/secperseg)
+    static SpectrogramResult computeSpectrogramNUFFT(
+        const std::vector<double> &timestamps,
+        const std::vector<double> &signal,
+        double secperseg,
+        double secoverlap,
+        double target_fs = 0.0)
+    {
+        if (timestamps.size() != signal.size())
+            throw std::runtime_error("timestamps and signal must have the same length");
+
+        if (timestamps.size() < 2)
+            throw std::runtime_error("compute_spectrogram_nufft requires at least two timestamps");
+
+        if (!(secperseg > 0.0))
+            throw std::runtime_error("secperseg must be > 0");
+
+        if (secoverlap < 0.0 || secoverlap >= secperseg)
+            throw std::runtime_error("secoverlap must satisfy 0 <= secoverlap < secperseg");
+
+        if (target_fs < 0.0)
+            throw std::runtime_error("target_fs must be >= 0");
+
+        // Estimate median sampling rate
+        std::vector<double> diffs;
+        diffs.reserve(timestamps.size() - 1);
+        for (size_t i = 1; i < timestamps.size(); ++i)
+        {
+            double dt = timestamps[i] - timestamps[i - 1];
+            if (std::isfinite(dt) && dt > 0.0)
+                diffs.push_back(dt);
+        }
+
+        if (diffs.empty())
+            throw std::runtime_error("timestamps must contain at least one positive time step");
+
+        std::sort(diffs.begin(), diffs.end());
+        double dt_median = diffs[diffs.size() / 2];
+        if (!(dt_median > 0.0) || !std::isfinite(dt_median))
+            throw std::runtime_error("median timestamp spacing must be finite and > 0");
+
+        double median_fs = 1.0 / dt_median;
+
+        // Window duration and hop in seconds (input is already in seconds)
+        double win_dur = secperseg;
+        double hop_dur = secperseg - secoverlap;
+
+        // Compute nfft based on actual window duration and median sampling rate
+        int nfft = (int)(secperseg * median_fs);
+        if (nfft < 2)
+            throw std::runtime_error("secperseg is too short for the observed sampling density");
+
+        // Round up to next power of 2 for efficiency
+        int nfft_padded = nfft;
+        {
+            int p = 1;
+            while (p < nfft) p <<= 1;
+            nfft_padded = p;
+        }
+
+        // Frequency axis for positive frequencies, including the Nyquist-equivalent bin.
+        int n_pos_freqs = nfft_padded / 2 + 1;
+        std::vector<double> freqs(n_pos_freqs);
+        for (int i = 0; i < n_pos_freqs; ++i)
+            freqs[i] = i / win_dur;
+
+        // Prepare output
+        std::vector<double> window_centres;
+        std::vector<std::vector<double>> spectra;
+
+        double t_start = timestamps[0];
+        double t_end = timestamps[timestamps.size() - 1];
+
+        // Sliding window loop
+        double win_start = t_start;
+        // Use two-pointer indices to avoid rescanning timestamps for every window
+        size_t start_idx = 0;
+        size_t end_idx = 0;
+        const size_t n = timestamps.size();
+        while (win_start + win_dur <= t_end + dt_median)
+        {
+            if (start_idx >= n)
+            {
+                // No more samples available for subsequent windows
+                break;
+            }
+
+            double win_end = win_start + win_dur;
+
+            // Advance start_idx to the first sample >= win_start
+            while (start_idx < n && timestamps[start_idx] < win_start)
+            {
+                ++start_idx;
+            }
+
+            // Ensure end_idx is at least start_idx, then advance to first sample >= win_end
+            if (end_idx < start_idx)
+            {
+                end_idx = start_idx;
+            }
+            while (end_idx < n && timestamps[end_idx] < win_end)
+            {
+                ++end_idx;
+            }
+
+            // Select samples in window [start_idx, end_idx)
+            std::vector<double> t_win, s_win;
+            t_win.reserve(end_idx > start_idx ? (end_idx - start_idx) : 0);
+            s_win.reserve(end_idx > start_idx ? (end_idx - start_idx) : 0);
+            for (size_t i = start_idx; i < end_idx; ++i)
+            {
+                t_win.push_back(timestamps[i]);
+                s_win.push_back(signal[i]);
+            }
+
+            if (t_win.size() < 4)
+            {
+                // Skip windows with too few samples
+                win_start += hop_dur;
+                continue;
+            }
+
+            // Compute tau and Hann window
+            std::vector<double> tau(t_win.size());
+            std::vector<double> hann(t_win.size());
+            double s_mean = 0.0;
+            for (size_t i = 0; i < s_win.size(); ++i)
+                s_mean += s_win[i];
+            s_mean /= s_win.size();
+
+            // Apply Hann window and detrend
+            for (size_t i = 0; i < t_win.size(); ++i)
+            {
+                tau[i] = (t_win[i] - win_start) / win_dur;
+                hann[i] = 0.5 * (1.0 - std::cos(2.0 * M_PI * tau[i]));
+                s_win[i] = (s_win[i] - s_mean) * hann[i];
+            }
+
+            // Map to NUFFT domain [-pi, pi)
+            std::vector<double> x(t_win.size());
+            for (size_t i = 0; i < tau.size(); ++i)
+                x[i] = 2.0 * M_PI * tau[i] - M_PI;
+
+            // Compute NUFFT using finufft
+            // Allocate arrays for finufft (uses std::complex<double>)
+            std::vector<std::complex<double>> c_complex(t_win.size());
+            std::vector<std::complex<double>> fhat_complex(nfft_padded);
+
+            // Fill input array with signal values as complex
+            for (size_t i = 0; i < t_win.size(); ++i)
+                c_complex[i] = std::complex<double>(s_win[i], 0.0);
+
+            // Make plan and execute
+            int ier = 0;
+            finufft_plan plan = nullptr;
+            finufft_opts opts;
+            finufft_default_opts(&opts);
+
+            int64_t nfft_long = nfft_padded;
+            ier = finufft_makeplan(1, 1, &nfft_long, +1, 1, 1e-14, &plan, &opts);
+            if (ier != 0)
+                throw std::runtime_error("finufft_makeplan failed");
+
+            ier = finufft_setpts(plan, (int64_t)t_win.size(), x.data(), nullptr, nullptr, 0, nullptr, nullptr, nullptr);
+            if (ier != 0)
+            {
+                finufft_destroy(plan);
+                throw std::runtime_error("finufft_setpts failed");
+            }
+
+            ier = finufft_execute(plan, c_complex.data(), fhat_complex.data());
+            if (ier != 0)
+            {
+                finufft_destroy(plan);
+                throw std::runtime_error("finufft_execute failed");
+            }
+
+            finufft_destroy(plan);
+
+            // Extract positive frequencies and compute PSD
+            std::vector<double> psd(n_pos_freqs);
+            double win_ss = 0.0;
+            for (size_t i = 0; i < hann.size(); ++i)
+                win_ss += hann[i] * hann[i];
+
+            if (win_ss > 0.0)
+            {
+                // Match computeSpectrogram: magnitude / sqrt(fs * Σw²)
+                double scale_factor = 1.0 / std::sqrt(median_fs * win_ss);
+                for (int k = 0; k < n_pos_freqs; ++k)
+                {
+                    int idx = (k == n_pos_freqs - 1) ? 0 : (nfft_padded / 2 + k);
+                    double real = fhat_complex[idx].real();
+                    double imag = fhat_complex[idx].imag();
+                    psd[k] = std::sqrt(real * real + imag * imag) * scale_factor;
+                }
+            }
+
+            spectra.push_back(psd);
+            window_centres.push_back(win_start + win_dur / 2.0);
+
+            win_start += hop_dur;
+        }
+
+        // Build result
+        SpectrogramResult result;
+        result.freqs = freqs;
+
+        if (spectra.empty())
+        {
+            result.times.clear();
+            result.Sxx.clear();
+        }
+        else
+        {
+            result.times.resize(window_centres.size());
+            for (size_t i = 0; i < window_centres.size(); ++i)
+                result.times[i] = window_centres[i] - t_start;
+            result.Sxx = spectra;
+        }
+
+        // If target_fs is specified, resample to a common frequency grid via cubic spline
+        if (target_fs > 0.0 && !result.Sxx.empty())
+        {
+            double fmax = target_fs / 2.0;
+            double freq_spacing = 1.0 / secperseg;
+
+            // Build target frequency grid
+            std::vector<double> target_freqs;
+            for (double f = 0; f <= fmax + freq_spacing / 2; f += freq_spacing)
+                target_freqs.push_back(f);
+
+            // Resample each time window using cubic spline
+            std::vector<std::vector<double>> resampled_Sxx(result.Sxx.size());
+
+            for (size_t t = 0; t < result.Sxx.size(); ++t)
+            {
+                const auto &psd_original = result.Sxx[t];
+
+                // Compute cubic spline coefficients
+                std::vector<double> freqs_dbl(freqs.begin(), freqs.end());
+                auto coeffs = computeNaturalCubicSplineCoeffs(freqs_dbl, psd_original);
+
+                // Evaluate at target frequencies
+                auto resampled = evaluateCubicSpline(freqs_dbl, psd_original, coeffs, target_freqs);
+                resampled_Sxx[t] = resampled;
+            }
+
+            result.freqs = target_freqs;
+            result.Sxx = resampled_Sxx;
+        }
+
         return result;
     }
 
@@ -797,8 +1058,8 @@ public:
         return watch_freq_sum;
     }
 
-    static std::pair<std::vector<long>, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>> resampleAccelerometer(
-        const std::vector<long> &timestamps,
+    static std::pair<std::vector<std::int64_t>, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>> resampleAccelerometer(
+        const std::vector<std::int64_t> &timestamps,
         const std::vector<double> &x,
         const std::vector<double> &y,
         const std::vector<double> &z,
@@ -807,12 +1068,12 @@ public:
         size_t n = timestamps.size();
         if (n < 2)
         {
-            return {std::vector<long>(), std::make_tuple(std::vector<double>(), std::vector<double>(), std::vector<double>())};
+            return {std::vector<std::int64_t>(), std::make_tuple(std::vector<double>(), std::vector<double>(), std::vector<double>())};
         }
 
         // Timestamps are in microseconds
-        long startTimeUs = timestamps.front();
-        long endTimeUs = timestamps.back();
+        std::int64_t startTimeUs = timestamps.front();
+        std::int64_t endTimeUs = timestamps.back();
 
         // Calculate number of samples needed
         double durationSec = (endTimeUs - startTimeUs) / 1000000.0;
@@ -820,7 +1081,7 @@ public:
         if (numSamples < 1)
             numSamples = 1;
 
-        std::vector<long> resampledTime(numSamples);
+        std::vector<std::int64_t> resampledTime(numSamples);
         std::vector<double> rx(numSamples), ry(numSamples), rz(numSamples);
 
         // Generate new time points in microseconds
@@ -834,7 +1095,7 @@ public:
             else
             {
                 // Generate evenly spaced time points at target frequency
-                resampledTime[i] = startTimeUs + static_cast<long>(i * intervalUs);
+                resampledTime[i] = startTimeUs + static_cast<std::int64_t>(i * intervalUs);
             }
         }
 
@@ -842,7 +1103,7 @@ public:
 
         for (int i = 0; i < numSamples; ++i)
         {
-            long t = resampledTime[i];
+            std::int64_t t = resampledTime[i];
 
             // Handle extrapolation cases first
             if (t <= timestamps[0])
@@ -888,19 +1149,170 @@ public:
         return {resampledTime, std::make_tuple(rx, ry, rz)};
     }
 
-    static std::pair<std::vector<long>, std::vector<double>> computeJerk(
-        const std::vector<long> &timestamps,
-        const std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> &accelerometerData)
+    // ── Cubic-spline helpers ──────────────────────────────────────────
+    // Solve for natural cubic spline coefficients given knot values y
+    // at (not-necessarily-uniform) knot positions t.
+    // Returns vectors b, c, d such that on interval [t_i, t_i+1]:
+    //   S(x) = y_i + b_i*(x-t_i) + c_i*(x-t_i)^2 + d_i*(x-t_i)^3
+    struct CubicSplineCoeffs
+    {
+        std::vector<double> b, c, d;
+    };
+
+    static CubicSplineCoeffs computeNaturalCubicSplineCoeffs(
+        const std::vector<double> &t,
+        const std::vector<double> &y)
+    {
+        size_t n = t.size();
+        // n >= 2 guaranteed by caller
+
+        std::vector<double> h(n - 1);
+        for (size_t i = 0; i < n - 1; ++i)
+            h[i] = t[i + 1] - t[i];
+
+        // Solve tridiagonal system for c (natural boundary: c[0]=c[n-1]=0)
+        std::vector<double> alpha(n, 0.0);
+        for (size_t i = 1; i < n - 1; ++i)
+        {
+            alpha[i] = 3.0 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y[i - 1]) / h[i - 1]);
+        }
+
+        std::vector<double> c(n, 0.0);
+        std::vector<double> l(n, 1.0), mu(n, 0.0), z(n, 0.0);
+
+        for (size_t i = 1; i < n - 1; ++i)
+        {
+            l[i] = 2.0 * (t[i + 1] - t[i - 1]) - h[i - 1] * mu[i - 1];
+            mu[i] = h[i] / l[i];
+            z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i];
+        }
+
+        // Back-substitution
+        for (int i = static_cast<int>(n) - 2; i >= 0; --i)
+        {
+            c[i] = z[i] - mu[i] * c[i + 1];
+        }
+
+        std::vector<double> b(n - 1), d(n - 1);
+        for (size_t i = 0; i < n - 1; ++i)
+        {
+            d[i] = (c[i + 1] - c[i]) / (3.0 * h[i]);
+            b[i] = (y[i + 1] - y[i]) / h[i] - h[i] * (c[i + 1] + 2.0 * c[i]) / 3.0;
+        }
+
+        // Trim c to n-1 entries to match b, d
+        c.resize(n - 1);
+
+        return {b, c, d};
+    }
+
+    // Evaluate cubic spline at a set of sorted query points
+    static std::vector<double> evaluateCubicSpline(
+        const std::vector<double> &t,          // knot positions (sorted)
+        const std::vector<double> &y,          // knot values
+        const CubicSplineCoeffs &coeffs,
+        const std::vector<double> &queries)    // query positions (sorted)
+    {
+        size_t n = t.size();
+        size_t m = queries.size();
+        const auto &b = coeffs.b;
+        const auto &c = coeffs.c;
+        const auto &d = coeffs.d;
+
+        std::vector<double> result(m);
+        size_t seg = 0;
+
+        for (size_t j = 0; j < m; ++j)
+        {
+            double q = queries[j];
+
+            // Clamp to data range
+            if (q <= t[0])
+            {
+                result[j] = y[0];
+                continue;
+            }
+            if (q >= t[n - 1])
+            {
+                result[j] = y[n - 1];
+                continue;
+            }
+
+            // Advance segment pointer (queries are sorted)
+            while (seg < n - 2 && t[seg + 1] < q)
+                seg++;
+
+            double dx = q - t[seg];
+            result[j] = y[seg] + dx * (b[seg] + dx * (c[seg] + dx * d[seg]));
+        }
+
+        return result;
+    }
+
+    // ── Cubic-spline resampling ───────────────────────────────────────
+    static std::pair<std::vector<std::int64_t>, std::tuple<std::vector<double>, std::vector<double>, std::vector<double>>>
+    resampleAccelerometerCubic(
+        const std::vector<std::int64_t> &timestamps,
+        const std::vector<double> &x,
+        const std::vector<double> &y,
+        const std::vector<double> &z,
+        double targetFs)
+    {
+        size_t n = timestamps.size();
+        if (n < 2)
+        {
+            return {std::vector<std::int64_t>(), std::make_tuple(std::vector<double>(), std::vector<double>(), std::vector<double>())};
+        }
+
+        std::int64_t startTimeUs = timestamps.front();
+        std::int64_t endTimeUs = timestamps.back();
+        double durationSec = (endTimeUs - startTimeUs) / 1000000.0;
+        int numSamples = static_cast<int>(durationSec * targetFs);
+        if (numSamples < 1)
+            numSamples = 1;
+
+        // Build uniform output time grid (microseconds)
+        double intervalUs = 1000000.0 / targetFs;
+        std::vector<std::int64_t> resampledTime(numSamples);
+        std::vector<double> queryT(numSamples);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            resampledTime[i] = startTimeUs + static_cast<std::int64_t>(i * intervalUs);
+            queryT[i] = static_cast<double>(resampledTime[i]);
+        }
+
+        // Convert timestamps to double for spline computation
+        std::vector<double> tDouble(n);
+        for (size_t i = 0; i < n; ++i)
+            tDouble[i] = static_cast<double>(timestamps[i]);
+
+        // Compute spline coefficients for each axis
+        auto coeffsX = computeNaturalCubicSplineCoeffs(tDouble, x);
+        auto coeffsY = computeNaturalCubicSplineCoeffs(tDouble, y);
+        auto coeffsZ = computeNaturalCubicSplineCoeffs(tDouble, z);
+
+        // Evaluate
+        auto rx = evaluateCubicSpline(tDouble, x, coeffsX, queryT);
+        auto ry = evaluateCubicSpline(tDouble, y, coeffsY, queryT);
+        auto rz = evaluateCubicSpline(tDouble, z, coeffsZ, queryT);
+
+        return {resampledTime, std::make_tuple(rx, ry, rz)};
+    }
+
+    static std::pair<std::vector<std::int64_t>, std::vector<double>> computeJerk(
+        const std::vector<std::int64_t> &timestamps,
+        const std::tuple<std::vector<double>, std::vector<double>, std::vector<double>> &accelerometerData,
+        bool diff = true)
     {
         const auto &[x, y, z] = accelerometerData;
         size_t numSamples = x.size();
 
         if (numSamples < 2)
         {
-            return {std::vector<long>(), std::vector<double>()};
+            return {std::vector<std::int64_t>(), std::vector<double>()};
         }
 
-        std::vector<long> jerkTimes(numSamples);
+        std::vector<std::int64_t> jerkTimes(numSamples);
         std::vector<double> jerkOut(numSamples);
 
         // First value is 0 (matching Python behavior)
@@ -910,9 +1322,9 @@ public:
         // Jerk computation (derivative of acceleration) starting from index 1
         for (size_t i = 1; i < numSamples; i++)
         {
-            double dvx = (x[i] - x[i - 1]);
-            double dvy = (y[i] - y[i - 1]);
-            double dvz = (z[i] - z[i - 1]);
+            double dvx = diff ? (x[i] - x[i - 1]) : x[i];
+            double dvy = diff ? (y[i] - y[i - 1]) : y[i];
+            double dvz = diff ? (z[i] - z[i - 1]) : z[i];
             jerkOut[i] = std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
             jerkTimes[i] = timestamps[i]; // Use timestamp of current sample
         }
@@ -999,7 +1411,7 @@ extern "C"
 {
     void *resample_accelerometer(int64_t *timestamps, double *x, double *y, double *z, int length, double targetFs, int *outLength)
     {
-        std::vector<long> ts(length);
+        std::vector<std::int64_t> ts(length);
         for (int i = 0; i < length; i++)
             ts[i] = timestamps[i];
         std::vector<double> ax(x, x + length);
@@ -1035,9 +1447,9 @@ extern "C"
         return output;
     }
 
-    double *compute_jerk(int64_t *timestamps, double *x, double *y, double *z, int length, int *outLength)
+    double *compute_jerk(int64_t *timestamps, double *x, double *y, double *z, int length, bool diff, int *outLength)
     {
-        std::vector<long> ts(length);
+        std::vector<std::int64_t> ts(length);
         for (int i = 0; i < length; i++)
             ts[i] = timestamps[i];
         std::vector<double> ax(x, x + length);
@@ -1045,7 +1457,7 @@ extern "C"
         std::vector<double> az(z, z + length);
 
         auto accelerometerData = std::make_tuple(ax, ay, az);
-        auto result = SensorProcessor::computeJerk(ts, accelerometerData);
+        auto result = SensorProcessor::computeJerk(ts, accelerometerData, diff);
         const auto &jerkValues = result.second;
 
         *outLength = jerkValues.size();
@@ -1175,8 +1587,8 @@ py::dict resampleAccelerometer_wrapper(
         throw std::runtime_error("Input arrays must have the same length");
     }
 
-    std::vector<long> ts_vec(static_cast<long *>(ts_buf.ptr),
-                             static_cast<long *>(ts_buf.ptr) + ts_buf.size);
+    std::vector<std::int64_t> ts_vec(static_cast<std::int64_t *>(ts_buf.ptr),
+                                     static_cast<std::int64_t *>(ts_buf.ptr) + ts_buf.size);
     std::vector<double> x_vec(static_cast<double *>(x_buf.ptr),
                               static_cast<double *>(x_buf.ptr) + x_buf.size);
     std::vector<double> y_vec(static_cast<double *>(y_buf.ptr),
@@ -1208,11 +1620,12 @@ py::dict resampleAccelerometer_wrapper(
     return result_dict;
 }
 
-py::dict computeJerk_wrapper(
+py::dict resampleAccelerometerCubic_wrapper(
     py::array_t<int64_t> timestamps,
     py::array_t<double> x,
     py::array_t<double> y,
-    py::array_t<double> z)
+    py::array_t<double> z,
+    double targetFs)
 {
     auto ts_buf = timestamps.request();
     auto x_buf = x.request();
@@ -1224,8 +1637,58 @@ py::dict computeJerk_wrapper(
         throw std::runtime_error("Input arrays must have the same length");
     }
 
-    std::vector<long> ts_vec(static_cast<long *>(ts_buf.ptr),
-                             static_cast<long *>(ts_buf.ptr) + ts_buf.size);
+    std::vector<std::int64_t> ts_vec(static_cast<std::int64_t *>(ts_buf.ptr),
+                                     static_cast<std::int64_t *>(ts_buf.ptr) + ts_buf.size);
+    std::vector<double> x_vec(static_cast<double *>(x_buf.ptr),
+                              static_cast<double *>(x_buf.ptr) + x_buf.size);
+    std::vector<double> y_vec(static_cast<double *>(y_buf.ptr),
+                              static_cast<double *>(y_buf.ptr) + y_buf.size);
+    std::vector<double> z_vec(static_cast<double *>(z_buf.ptr),
+                              static_cast<double *>(z_buf.ptr) + z_buf.size);
+
+    auto result = SensorProcessor::resampleAccelerometerCubic(ts_vec, x_vec, y_vec, z_vec, targetFs);
+    auto &resampled_time = result.first;
+    auto &[rx, ry, rz] = result.second;
+
+    py::array_t<int64_t> out_timestamps(resampled_time.size());
+    py::array_t<double> out_x(rx.size());
+    py::array_t<double> out_y(ry.size());
+    py::array_t<double> out_z(rz.size());
+
+    std::copy(resampled_time.begin(), resampled_time.end(),
+              static_cast<int64_t *>(out_timestamps.request().ptr));
+    std::copy(rx.begin(), rx.end(), static_cast<double *>(out_x.request().ptr));
+    std::copy(ry.begin(), ry.end(), static_cast<double *>(out_y.request().ptr));
+    std::copy(rz.begin(), rz.end(), static_cast<double *>(out_z.request().ptr));
+
+    py::dict result_dict;
+    result_dict["timestamps"] = out_timestamps;
+    result_dict["x"] = out_x;
+    result_dict["y"] = out_y;
+    result_dict["z"] = out_z;
+
+    return result_dict;
+}
+
+py::dict computeJerk_wrapper(
+    py::array_t<int64_t> timestamps,
+    py::array_t<double> x,
+    py::array_t<double> y,
+    py::array_t<double> z,
+    bool diff = true)
+{
+    auto ts_buf = timestamps.request();
+    auto x_buf = x.request();
+    auto y_buf = y.request();
+    auto z_buf = z.request();
+
+    if (ts_buf.size != x_buf.size || ts_buf.size != y_buf.size || ts_buf.size != z_buf.size)
+    {
+        throw std::runtime_error("Input arrays must have the same length");
+    }
+
+    std::vector<std::int64_t> ts_vec(static_cast<std::int64_t *>(ts_buf.ptr),
+                                     static_cast<std::int64_t *>(ts_buf.ptr) + ts_buf.size);
     std::vector<double> x_vec(static_cast<double *>(x_buf.ptr),
                               static_cast<double *>(x_buf.ptr) + x_buf.size);
     std::vector<double> y_vec(static_cast<double *>(y_buf.ptr),
@@ -1234,7 +1697,7 @@ py::dict computeJerk_wrapper(
                               static_cast<double *>(z_buf.ptr) + z_buf.size);
 
     auto accelerometerData = std::make_tuple(x_vec, y_vec, z_vec);
-    auto result = SensorProcessor::computeJerk(ts_vec, accelerometerData);
+    auto result = SensorProcessor::computeJerk(ts_vec, accelerometerData, diff);
 
     py::array_t<int64_t> out_timestamps(result.first.size());
     py::array_t<double> out_jerk(result.second.size());
@@ -1359,6 +1822,64 @@ py::array_t<double> computeShortTimeFT_wrapper(
     }
 
     return output;
+}
+
+py::dict computeSpectrogramNUFFT_wrapper(
+    py::array_t<double> timestamps,
+    py::array_t<double> signal,
+    double secperseg,
+    double secoverlap,
+    double target_fs = 0.0)
+{
+    auto ts_buf = timestamps.request();
+    auto sig_buf = signal.request();
+
+    if (ts_buf.size != sig_buf.size)
+    {
+        throw std::runtime_error("timestamps and signal must have the same length");
+    }
+
+    std::vector<double> timestamps_vec(static_cast<double *>(ts_buf.ptr),
+                                       static_cast<double *>(ts_buf.ptr) + ts_buf.size);
+    std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
+                                   static_cast<double *>(sig_buf.ptr) + sig_buf.size);
+
+    auto result = SensorProcessor::computeSpectrogramNUFFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs);
+
+    // Convert frequencies to NumPy array
+    py::array_t<double> freqs(result.freqs.size());
+    std::copy(result.freqs.begin(), result.freqs.end(),
+              static_cast<double *>(freqs.request().ptr));
+
+    // Convert times to NumPy array
+    py::array_t<double> times(result.times.size());
+    std::copy(result.times.begin(), result.times.end(),
+              static_cast<double *>(times.request().ptr));
+
+    // Convert Sxx to 2D NumPy array (times x freqs)
+    size_t n_times = result.Sxx.size();
+    size_t n_freqs = (n_times > 0) ? result.Sxx[0].size() : 0;
+    py::array_t<double> Sxx({n_times, n_freqs});
+
+    if (n_times > 0 && n_freqs > 0)
+    {
+        auto Sxx_buf = Sxx.request();
+        double *Sxx_ptr = static_cast<double *>(Sxx_buf.ptr);
+        for (size_t t = 0; t < n_times; ++t)
+        {
+            for (size_t f = 0; f < n_freqs; ++f)
+            {
+                Sxx_ptr[t * n_freqs + f] = result.Sxx[t][f];
+            }
+        }
+    }
+
+    py::dict result_dict;
+    result_dict["freqs"] = freqs;
+    result_dict["times"] = times;
+    result_dict["Sxx"] = Sxx;
+
+    return result_dict;
 }
 
 py::dict computeMotionFeatures_wrapper(
@@ -1581,12 +2102,21 @@ PYBIND11_MODULE(_core, m)
           py::arg("z"),
           py::arg("targetFs"));
 
+    m.def("resample_accelerometer_cubic", &resampleAccelerometerCubic_wrapper,
+          "Resample accelerometer data using natural cubic spline interpolation",
+          py::arg("timestamps"),
+          py::arg("x"),
+          py::arg("y"),
+          py::arg("z"),
+          py::arg("targetFs"));
+
     m.def("compute_jerk", &computeJerk_wrapper,
           "Compute jerk (derivative of acceleration) from accelerometer data",
           py::arg("timestamps"),
           py::arg("x"),
           py::arg("y"),
-          py::arg("z"));
+          py::arg("z"),
+          py::arg("diff") = true);
 
     m.def("compute_magnitude", &computeMagnitude_wrapper,
           "Compute magnitude from x, y, z components",
@@ -1600,6 +2130,14 @@ PYBIND11_MODULE(_core, m)
           py::arg("fs"),
           py::arg("nperseg"),
           py::arg("noverlap"));
+
+    m.def("compute_spectrogram_nufft", &computeSpectrogramNUFFT_wrapper,
+          "Compute spectrogram from non-uniformly sampled data using finufft",
+          py::arg("timestamps"),
+          py::arg("signal"),
+          py::arg("secperseg"),
+          py::arg("secoverlap"),
+          py::arg("target_fs") = 0.0);
 
     m.def("compute_short_time_ft", &computeShortTimeFT_wrapper,
           "Compute Short-Time Fourier Transform returning complex values (n_times, n_frequencies, 2)",
