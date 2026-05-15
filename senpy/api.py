@@ -104,6 +104,8 @@ class SpectrogramResult:
         freqs: Array of frequency bins in Hz
         times: Array of time bins in seconds
         Sxx:  (time, frequency) array of power spectral density
+        phase_vector: Optional (time, frequency, 2) array containing [cos(theta), sin(theta)]
+        phase_weight: Optional (time, frequency) array where 0 marks phase as unusable
     """
 
     def __init__(
@@ -111,10 +113,21 @@ class SpectrogramResult:
         frequencies: NDArray[np.float64],
         times: NDArray[np.float64],
         Sxx: NDArray[np.float64],
+        phase_vector: Optional[NDArray[np.float64]] = None,
+        phase_weight: Optional[NDArray[np.float64]] = None,
     ):
         self.frequencies = frequencies
         self.times = times
         self.Sxx = Sxx
+        self.phase_vector = phase_vector
+        self.phase_weight = phase_weight
+
+    @property
+    def phase_angle(self) -> Optional[NDArray[np.float64]]:
+        """Phase angle in radians, derived from phase_vector when available."""
+        if self.phase_vector is None:
+            return None
+        return np.arctan2(self.phase_vector[:, :, 1], self.phase_vector[:, :, 0])
 
     @property
     def frequency_resolution(self) -> float:
@@ -404,6 +417,8 @@ def compute_spectrogram_nufft(
     secoverlap: float,
     ts_unit: str = "s",
     target_fs: Optional[float] = None,
+    return_phase: bool = False,
+    phase_magnitude_threshold: float = 0.0,
 ) -> SpectrogramResult:
     """Compute a spectrogram directly from non-uniformly sampled data
     using the Non-Uniform FFT, bypassing time-domain resampling entirely.
@@ -413,7 +428,8 @@ def compute_spectrogram_nufft(
     1. Selects the non-uniform samples falling within the window (fixed duration in seconds).
     2. Applies a Hann window evaluated at the true sample times.
     3. Computes the spectrum via type-1 NUFFT using finufft (via C++ backend).
-    4. Interpolates to a common frequency grid (if target_fs is specified).
+    4. Optionally computes phase as unit-circle vectors with a validity weight.
+    5. Interpolates to a common frequency grid (if target_fs is specified).
 
     Because no resampling interpolation is involved, the result is free
     of the spectral artifacts that linear or spline resampling introduce
@@ -428,10 +444,16 @@ def compute_spectrogram_nufft(
         target_fs: If specified, interpolate output to a fixed frequency grid
                    with this sampling rate. Frequency spacing will be 1/secperseg.
                    Fmax will be target_fs/2.
+        return_phase: If true, include ``phase_vector`` and ``phase_weight``.
+        phase_magnitude_threshold: Scaled magnitude threshold for phase validity.
+                                   Bins at or below this value get phase_vector
+                                   ``[0, 0]`` and phase_weight ``0``.
 
     Returns:
         SpectrogramResult with *frequencies* (Hz), *times* (s), and
         *Sxx* power spectral density array shaped ``(n_times, n_freqs)``.
+        If requested, *phase_vector* is shaped ``(n_times, n_freqs, 2)`` and
+        stores ``[cos(theta), sin(theta)]``.
 
     Notes:
         ``secperseg`` and ``secoverlap`` are durations, not sample counts.
@@ -453,6 +475,9 @@ def compute_spectrogram_nufft(
     if target_fs is not None and target_fs < 0:
         raise ValueError("target_fs must be >= 0")
 
+    if phase_magnitude_threshold < 0 or not np.isfinite(phase_magnitude_threshold):
+        raise ValueError("phase_magnitude_threshold must be finite and >= 0")
+
     # Convert timestamps to seconds if needed
     conversion = {"s": 1.0, "ms": 1e-3, "us": 1e-6}.get(ts_unit, 1.0)
     t = timestamps.astype(np.float64) * conversion
@@ -462,12 +487,20 @@ def compute_spectrogram_nufft(
 
     try:
         result_dict = _senpy.compute_spectrogram_nufft(
-            t, signal.astype(np.float64), secperseg, secoverlap, target_fs_val
+            t,
+            signal.astype(np.float64),
+            secperseg,
+            secoverlap,
+            target_fs_val,
+            return_phase,
+            phase_magnitude_threshold,
         )
         return SpectrogramResult(
             frequencies=result_dict["freqs"],
             times=result_dict["times"],
-            Sxx=result_dict["Sxx"]
+            Sxx=result_dict["Sxx"],
+            phase_vector=result_dict.get("phase_vector"),
+            phase_weight=result_dict.get("phase_weight"),
         )
     except RuntimeError as e:
         raise RuntimeError(f"C++ NUFFT computation failed: {e}")

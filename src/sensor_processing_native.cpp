@@ -19,9 +19,11 @@
 
 struct SpectrogramResult
 {
-    std::vector<double> freqs;            // Hz
-    std::vector<double> times;            // Relative time in seconds
-    std::vector<std::vector<double>> Sxx; // [times x frequencies]
+    std::vector<double> freqs;                              // Hz
+    std::vector<double> times;                              // Relative time in seconds
+    std::vector<std::vector<double>> Sxx;                   // [times x frequencies]
+    std::vector<std::vector<std::vector<double>>> phase_vector; // Optional [times x frequencies x 2], [cos, sin]
+    std::vector<std::vector<double>> phase_weight;          // Optional [times x frequencies]
 };
 
 struct MotionFeaturesResult
@@ -301,7 +303,9 @@ public:
         const std::vector<double> &signal,
         double secperseg,
         double secoverlap,
-        double target_fs = 0.0)
+        double target_fs = 0.0,
+        bool return_phase = false,
+        double phase_magnitude_threshold = 0.0)
     {
         if (timestamps.size() != signal.size())
             throw std::runtime_error("timestamps and signal must have the same length");
@@ -317,6 +321,9 @@ public:
 
         if (target_fs < 0.0)
             throw std::runtime_error("target_fs must be >= 0");
+
+        if (phase_magnitude_threshold < 0.0 || !std::isfinite(phase_magnitude_threshold))
+            throw std::runtime_error("phase_magnitude_threshold must be finite and >= 0");
 
         // Estimate median sampling rate
         std::vector<double> diffs;
@@ -364,6 +371,8 @@ public:
         // Prepare output
         std::vector<double> window_centres;
         std::vector<std::vector<double>> spectra;
+        std::vector<std::vector<std::vector<double>>> phase_vectors;
+        std::vector<std::vector<double>> phase_weights;
 
         double t_start = timestamps[0];
         double t_end = timestamps[timestamps.size() - 1];
@@ -476,6 +485,14 @@ public:
 
             // Extract positive frequencies and compute PSD
             std::vector<double> psd(n_pos_freqs);
+            std::vector<std::vector<double>> phase_vector;
+            std::vector<double> phase_weight;
+            if (return_phase)
+            {
+                phase_vector.assign(n_pos_freqs, std::vector<double>(2, 0.0));
+                phase_weight.assign(n_pos_freqs, 0.0);
+            }
+
             double win_ss = 0.0;
             for (size_t i = 0; i < hann.size(); ++i)
                 win_ss += hann[i] * hann[i];
@@ -489,11 +506,24 @@ public:
                     int idx = (k == n_pos_freqs - 1) ? 0 : (nfft_padded / 2 + k);
                     double real = fhat_complex[idx].real();
                     double imag = fhat_complex[idx].imag();
-                    psd[k] = std::sqrt(real * real + imag * imag) * scale_factor;
+                    double magnitude = std::sqrt(real * real + imag * imag);
+                    psd[k] = magnitude * scale_factor;
+
+                    if (return_phase && psd[k] > phase_magnitude_threshold && magnitude > 0.0)
+                    {
+                        phase_vector[k][0] = real / magnitude;
+                        phase_vector[k][1] = imag / magnitude;
+                        phase_weight[k] = 1.0;
+                    }
                 }
             }
 
             spectra.push_back(psd);
+            if (return_phase)
+            {
+                phase_vectors.push_back(phase_vector);
+                phase_weights.push_back(phase_weight);
+            }
             window_centres.push_back(win_start + win_dur / 2.0);
 
             win_start += hop_dur;
@@ -514,6 +544,11 @@ public:
             for (size_t i = 0; i < window_centres.size(); ++i)
                 result.times[i] = window_centres[i] - t_start;
             result.Sxx = spectra;
+            if (return_phase)
+            {
+                result.phase_vector = phase_vectors;
+                result.phase_weight = phase_weights;
+            }
         }
 
         // If target_fs is specified, resample to a common frequency grid via cubic spline
@@ -529,6 +564,13 @@ public:
 
             // Resample each time window using cubic spline
             std::vector<std::vector<double>> resampled_Sxx(result.Sxx.size());
+            std::vector<std::vector<std::vector<double>>> resampled_phase_vector;
+            std::vector<std::vector<double>> resampled_phase_weight;
+            if (return_phase && !result.phase_vector.empty())
+            {
+                resampled_phase_vector.resize(result.phase_vector.size());
+                resampled_phase_weight.resize(result.phase_weight.size());
+            }
 
             for (size_t t = 0; t < result.Sxx.size(); ++t)
             {
@@ -541,10 +583,48 @@ public:
                 // Evaluate at target frequencies
                 auto resampled = evaluateCubicSpline(freqs_dbl, psd_original, coeffs, target_freqs);
                 resampled_Sxx[t] = resampled;
+
+                if (return_phase && !result.phase_vector.empty())
+                {
+                    std::vector<double> phase_x(freqs.size());
+                    std::vector<double> phase_y(freqs.size());
+                    for (size_t f = 0; f < freqs.size(); ++f)
+                    {
+                        phase_x[f] = result.phase_vector[t][f][0] * result.phase_weight[t][f];
+                        phase_y[f] = result.phase_vector[t][f][1] * result.phase_weight[t][f];
+                    }
+
+                    auto coeffs_x = computeNaturalCubicSplineCoeffs(freqs_dbl, phase_x);
+                    auto coeffs_y = computeNaturalCubicSplineCoeffs(freqs_dbl, phase_y);
+                    auto coeffs_w = computeNaturalCubicSplineCoeffs(freqs_dbl, result.phase_weight[t]);
+
+                    auto resampled_x = evaluateCubicSpline(freqs_dbl, phase_x, coeffs_x, target_freqs);
+                    auto resampled_y = evaluateCubicSpline(freqs_dbl, phase_y, coeffs_y, target_freqs);
+                    auto resampled_w = evaluateCubicSpline(freqs_dbl, result.phase_weight[t], coeffs_w, target_freqs);
+
+                    resampled_phase_vector[t].assign(target_freqs.size(), std::vector<double>(2, 0.0));
+                    resampled_phase_weight[t].assign(target_freqs.size(), 0.0);
+                    for (size_t f = 0; f < target_freqs.size(); ++f)
+                    {
+                        double weight = std::clamp(resampled_w[f], 0.0, 1.0);
+                        double norm = std::sqrt(resampled_x[f] * resampled_x[f] + resampled_y[f] * resampled_y[f]);
+                        if (weight > 0.0 && norm > 0.0)
+                        {
+                            resampled_phase_vector[t][f][0] = resampled_x[f] / norm;
+                            resampled_phase_vector[t][f][1] = resampled_y[f] / norm;
+                            resampled_phase_weight[t][f] = weight;
+                        }
+                    }
+                }
             }
 
             result.freqs = target_freqs;
             result.Sxx = resampled_Sxx;
+            if (return_phase && !resampled_phase_vector.empty())
+            {
+                result.phase_vector = resampled_phase_vector;
+                result.phase_weight = resampled_phase_weight;
+            }
         }
 
         return result;
@@ -1829,7 +1909,9 @@ py::dict computeSpectrogramNUFFT_wrapper(
     py::array_t<double> signal,
     double secperseg,
     double secoverlap,
-    double target_fs = 0.0)
+    double target_fs = 0.0,
+    bool return_phase = false,
+    double phase_magnitude_threshold = 0.0)
 {
     auto ts_buf = timestamps.request();
     auto sig_buf = signal.request();
@@ -1844,7 +1926,9 @@ py::dict computeSpectrogramNUFFT_wrapper(
     std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
                                    static_cast<double *>(sig_buf.ptr) + sig_buf.size);
 
-    auto result = SensorProcessor::computeSpectrogramNUFFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs);
+    auto result = SensorProcessor::computeSpectrogramNUFFT(
+        timestamps_vec, signal_vec, secperseg, secoverlap, target_fs,
+        return_phase, phase_magnitude_threshold);
 
     // Convert frequencies to NumPy array
     py::array_t<double> freqs(result.freqs.size());
@@ -1878,6 +1962,31 @@ py::dict computeSpectrogramNUFFT_wrapper(
     result_dict["freqs"] = freqs;
     result_dict["times"] = times;
     result_dict["Sxx"] = Sxx;
+
+    if (return_phase && !result.phase_vector.empty())
+    {
+        py::array_t<double> phase_vector({n_times, n_freqs, (size_t)2});
+        py::array_t<double> phase_weight({n_times, n_freqs});
+
+        auto phase_vec_buf = phase_vector.request();
+        auto phase_weight_buf = phase_weight.request();
+        double *phase_vec_ptr = static_cast<double *>(phase_vec_buf.ptr);
+        double *phase_weight_ptr = static_cast<double *>(phase_weight_buf.ptr);
+
+        for (size_t t = 0; t < n_times; ++t)
+        {
+            for (size_t f = 0; f < n_freqs; ++f)
+            {
+                size_t phase_idx = (t * n_freqs + f) * 2;
+                phase_vec_ptr[phase_idx] = result.phase_vector[t][f][0];
+                phase_vec_ptr[phase_idx + 1] = result.phase_vector[t][f][1];
+                phase_weight_ptr[t * n_freqs + f] = result.phase_weight[t][f];
+            }
+        }
+
+        result_dict["phase_vector"] = phase_vector;
+        result_dict["phase_weight"] = phase_weight;
+    }
 
     return result_dict;
 }
@@ -2137,7 +2246,9 @@ PYBIND11_MODULE(_core, m)
           py::arg("signal"),
           py::arg("secperseg"),
           py::arg("secoverlap"),
-          py::arg("target_fs") = 0.0);
+          py::arg("target_fs") = 0.0,
+          py::arg("return_phase") = false,
+          py::arg("phase_magnitude_threshold") = 0.0);
 
     m.def("compute_short_time_ft", &computeShortTimeFT_wrapper,
           "Compute Short-Time Fourier Transform returning complex values (n_times, n_frequencies, 2)",

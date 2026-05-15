@@ -294,6 +294,63 @@ class TestNufftSpectrogram:
         assert abs(peak_7 - 7.0) < 0.5, f"7 Hz peak at {peak_7}"
         assert power_3 > power_7, "3 Hz should be stronger than 7 Hz"
 
+    def test_nufft_phase_vector_is_opt_in(self):
+        """NUFFT phase features should be absent unless explicitly requested."""
+        t, signal = self._make_known_spectrum(duration_s=10.0)
+        secperseg, secoverlap = window_seconds_from_samples(t, 128, 64)
+
+        spec = compute_spectrogram_nufft(t, signal, secperseg, secoverlap)
+
+        assert spec.phase_vector is None
+        assert spec.phase_weight is None
+
+    def test_nufft_phase_vector_shape_and_threshold(self):
+        """Requested NUFFT phase is a weighted unit vector with quiet bins at origin."""
+        t, signal = self._make_known_spectrum(duration_s=10.0)
+        secperseg, secoverlap = window_seconds_from_samples(t, 128, 64)
+
+        spec = compute_spectrogram_nufft(
+            t,
+            signal,
+            secperseg,
+            secoverlap,
+            return_phase=True,
+            phase_magnitude_threshold=0.01,
+        )
+
+        assert spec.phase_vector.shape == spec.Sxx.shape + (2,)
+        assert spec.phase_weight.shape == spec.Sxx.shape
+
+        norms = np.linalg.norm(spec.phase_vector, axis=2)
+        valid = spec.phase_weight > 0
+        invalid = ~valid
+
+        assert np.allclose(norms[valid], 1.0)
+        assert np.all(spec.phase_vector[invalid] == 0.0)
+        assert np.all((spec.phase_weight >= 0.0) & (spec.phase_weight <= 1.0))
+
+    def test_nufft_phase_vector_resamples_with_target_fs(self):
+        """Phase vectors should stay aligned with Sxx after target_fs interpolation."""
+        t, signal = self._make_known_spectrum(duration_s=10.0)
+        secperseg, secoverlap = window_seconds_from_samples(t, 128, 64)
+
+        spec = compute_spectrogram_nufft(
+            t,
+            signal,
+            secperseg,
+            secoverlap,
+            target_fs=20.0,
+            return_phase=True,
+            phase_magnitude_threshold=0.01,
+        )
+
+        assert spec.phase_vector.shape == spec.Sxx.shape + (2,)
+        assert spec.phase_weight.shape == spec.Sxx.shape
+
+        norms = np.linalg.norm(spec.phase_vector, axis=2)
+        valid = spec.phase_weight > 0
+        assert np.allclose(norms[valid], 1.0)
+
     def test_nufft_vs_resample_leakage(self):
         """For a high-freq tone, NUFFT spectrogram should show less
         artifact power in 0–10 Hz than resample-then-spectrogram.
