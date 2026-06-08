@@ -72,6 +72,29 @@ def test_uniform_spectrogram_is_time_major():
     assert spec.Sxx.shape == (len(spec.times), len(spec.frequencies))
 
 
+def test_resampled_spectrogram_rejects_rounded_zero_hop():
+    fs = 10.0
+    t = np.arange(50) / fs
+    signal = np.sin(2 * np.pi * 1.0 * t)
+
+    with pytest.raises(ValueError, match="noverlap < nperseg"):
+        sp.compute_resampled_spectrogram(
+            t,
+            signal,
+            target_fs=fs,
+            window_s=1.0,
+            overlap_s=0.99,
+        )
+
+
+def test_nustft_rejects_inputs_shorter_than_one_window():
+    t = np.array([0.0, 0.1, 0.2])
+    signal = np.array([1.0, 0.0, -1.0])
+
+    with pytest.raises(ValueError, match="at least one window"):
+        sp.compute_nustft(t, signal, window_s=10.0, overlap_s=5.0, target_fs=16.0)
+
+
 def test_compatibility_aliases_warn():
     t, signal = _jittered_tone()
 

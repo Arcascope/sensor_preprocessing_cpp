@@ -1,6 +1,7 @@
 """Shared fixtures for resampling artifact tests."""
 
 import os
+import warnings
 import pytest
 import numpy as np
 from pathlib import Path
@@ -37,6 +38,14 @@ def real_accel(request):
     """Parametrised fixture yielding (name, t, x, y, z) for each test CSV."""
     name = request.param
     if not (DATA_DIR / name).exists():
+        if os.environ.get("SENPY_REQUIRE_REAL_DATA") == "1":
+            pytest.fail(f"required real-data test file not found: {name}")
+        warnings.warn(
+            f"optional real-data test file not found: {name}; set "
+            "SENPY_REQUIRE_REAL_DATA=1 in CI to make this a failure",
+            pytest.PytestWarning,
+            stacklevel=2,
+        )
         pytest.skip(f"optional test data file not found: {name}")
     t, x, y, z = load_csv(name)
     return name, t, x, y, z

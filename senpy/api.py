@@ -258,6 +258,12 @@ class NUSTFTResult:
         raise ValueError("kind must be one of: 'magnitude', 'power', 'psd'")
 
     def spectrogram(self, kind: str = "psd") -> SpectrogramResult:
+        """Return a derived real-valued spectral surface.
+
+        The default is ``"psd"`` to emphasize the new complex-coefficient
+        workflow. Compatibility wrappers such as ``compute_nufft_spectrogram``
+        may choose ``"magnitude"`` to preserve older return-value expectations.
+        """
         return SpectrogramResult(
             frequencies=self.frequencies,
             times=self.times,
@@ -529,6 +535,15 @@ def _validate_time_window(window_s: float, overlap_s: float) -> None:
         raise ValueError("overlap_s must satisfy 0 <= overlap_s < window_s")
 
 
+def _validate_sample_window(nperseg: int, noverlap: int) -> None:
+    if nperseg <= 0:
+        raise ValueError("rounded window_s * target_fs must be at least 1 sample")
+    if noverlap < 0 or noverlap >= nperseg:
+        raise ValueError(
+            "rounded overlap_s * target_fs must satisfy 0 <= noverlap < nperseg"
+        )
+
+
 def compute_nustft(
     timestamps: NDArray[np.float64],
     signal: NDArray[np.float64],
@@ -576,6 +591,9 @@ def compute_nustft(
         )
     except RuntimeError as e:
         raise RuntimeError(f"C++ NUSTFT computation failed: {e}") from e
+
+    if len(result_dict["times"]) == 0 and len(result_dict["freqs"]) > 0:
+        raise ValueError("compute_nustft requires enough data for at least one window")
 
     return NUSTFTResult(
         frequencies=result_dict["freqs"],
@@ -795,6 +813,12 @@ def compute_resampled_spectrogram(
     ``compute_nustft`` is preferred for non-uniform or jittered timestamps.
     """
     _validate_time_window(window_s, overlap_s)
+    if target_fs <= 0:
+        raise ValueError("target_fs must be > 0")
+    nperseg = int(round(window_s * target_fs))
+    noverlap = int(round(overlap_s * target_fs))
+    _validate_sample_window(nperseg, noverlap)
+
     zeros = np.zeros_like(signal, dtype=np.float64)
     if resample_method == "linear":
         resampled = resample_accelerometer(
@@ -807,8 +831,6 @@ def compute_resampled_spectrogram(
     else:
         raise ValueError("resample_method must be 'linear' or 'cubic'")
 
-    nperseg = int(round(window_s * target_fs))
-    noverlap = int(round(overlap_s * target_fs))
     return compute_uniform_spectrogram(resampled.x, target_fs, nperseg, noverlap)
 
 
