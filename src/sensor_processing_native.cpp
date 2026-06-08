@@ -495,7 +495,8 @@ public:
                 for (int k = 0; k < n_pos_freqs; ++k)
                 {
                     int idx = (k == n_pos_freqs - 1) ? 0 : (nfft_padded / 2 + k);
-                    coeffs[k] = fhat_complex[idx] * scale_factor;
+                    double phase_correction = (k % 2 == 0) ? 1.0 : -1.0;
+                    coeffs[k] = fhat_complex[idx] * scale_factor * phase_correction;
                 }
             }
 
