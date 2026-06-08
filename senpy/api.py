@@ -3,12 +3,17 @@
 This module is an interface. The Python bindings already exist, but one must read the C++ code to understand how to use them. This module wraps the C++ bindings in a more Pythonic way.
 """
 
-from typing import Dict, List, Tuple, Union, Optional
+import warnings
+from typing import Tuple, Union, Optional
 import numpy as np
 from numpy.typing import NDArray
 
 # Import the C++ module
 import senpy._core as _senpy
+from ._version import __version__
+
+
+AXIS_ORDER_TIME_FREQUENCY = "time_frequency"
 
 
 # Add a simple test function to verify imports work
@@ -98,12 +103,15 @@ class JerkData:
 
 
 class SpectrogramResult:
-    """Container for spectrogram computation results.
+    """Container for a time-frequency spectral surface.
 
     Attributes:
-        freqs: Array of frequency bins in Hz
-        times: Array of time bins in seconds
-        Sxx:  (time, frequency) array of power spectral density
+        frequencies: Array of frequency bins in Hz.
+        times: Array of time bins in seconds.
+        Sxx: Array shaped ``(n_times, n_freqs)``.
+        kind: Spectral quantity stored in ``Sxx``: ``"magnitude"``,
+            ``"power"``, or ``"psd"``.
+        method: Computation method, such as ``"nufft"`` or ``"uniform_fft"``.
     """
 
     def __init__(
@@ -111,10 +119,23 @@ class SpectrogramResult:
         frequencies: NDArray[np.float64],
         times: NDArray[np.float64],
         Sxx: NDArray[np.float64],
+        kind: str = "magnitude",
+        method: str = "unknown",
     ):
-        self.frequencies = frequencies
-        self.times = times
-        self.Sxx = Sxx
+        self.frequencies = np.asarray(frequencies, dtype=np.float64)
+        self.times = np.asarray(times, dtype=np.float64)
+        self.Sxx = np.asarray(Sxx, dtype=np.float64)
+        self.kind = kind
+        self.method = method
+        self.axis_order = AXIS_ORDER_TIME_FREQUENCY
+        if self.Sxx.ndim != 2:
+            raise ValueError("Sxx must be a 2-D array shaped (n_times, n_freqs)")
+        expected_shape = (len(self.times), len(self.frequencies))
+        if self.Sxx.shape != expected_shape:
+            raise ValueError(
+                f"Sxx shape {self.Sxx.shape} does not match "
+                f"(len(times), len(frequencies)) {expected_shape}"
+            )
 
     @property
     def frequency_resolution(self) -> float:
@@ -168,6 +189,104 @@ class SpectrogramResult:
         )
 
         return peaks
+
+
+class NUSTFTResult:
+    """Complex non-uniform short-time Fourier transform result.
+
+    ``coefficients`` is always shaped ``(n_times, n_freqs)`` and contains
+    scaled complex FINUFFT coefficients. Derived spectra are exposed as views
+    so callers can choose magnitude, power, PSD-like density, or Welch-style
+    averages without recomputing the transform.
+    """
+
+    def __init__(
+        self,
+        frequencies: NDArray[np.float64],
+        times: NDArray[np.float64],
+        coefficients: NDArray[np.complex128],
+    ):
+        self.frequencies = np.asarray(frequencies, dtype=np.float64)
+        self.times = np.asarray(times, dtype=np.float64)
+        self.coefficients = np.asarray(coefficients, dtype=np.complex128)
+        self.method = "nufft"
+        self.axis_order = AXIS_ORDER_TIME_FREQUENCY
+        if self.coefficients.ndim != 2:
+            raise ValueError("coefficients must be shaped (n_times, n_freqs)")
+        expected_shape = (len(self.times), len(self.frequencies))
+        if self.coefficients.shape != expected_shape:
+            raise ValueError(
+                f"coefficients shape {self.coefficients.shape} does not match "
+                f"(len(times), len(frequencies)) {expected_shape}"
+            )
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        return self.coefficients.shape
+
+    @property
+    def frequency_resolution(self) -> float:
+        return (
+            self.frequencies[1] - self.frequencies[0]
+            if len(self.frequencies) > 1
+            else 0.0
+        )
+
+    @property
+    def time_resolution(self) -> float:
+        return self.times[1] - self.times[0] if len(self.times) > 1 else 0.0
+
+    @property
+    def magnitude(self) -> NDArray[np.float64]:
+        return np.abs(self.coefficients)
+
+    @property
+    def power(self) -> NDArray[np.float64]:
+        return np.abs(self.coefficients) ** 2
+
+    @property
+    def psd(self) -> NDArray[np.float64]:
+        return self.power
+
+    def _surface(self, kind: str) -> NDArray[np.float64]:
+        if kind == "magnitude":
+            return self.magnitude
+        if kind == "power":
+            return self.power
+        if kind == "psd":
+            return self.psd
+        raise ValueError("kind must be one of: 'magnitude', 'power', 'psd'")
+
+    def spectrogram(self, kind: str = "psd") -> SpectrogramResult:
+        """Return a derived real-valued spectral surface.
+
+        The default is ``"psd"`` to emphasize the new complex-coefficient
+        workflow. Compatibility wrappers such as ``compute_nufft_spectrogram``
+        may choose ``"magnitude"`` to preserve older return-value expectations.
+        """
+        return SpectrogramResult(
+            frequencies=self.frequencies,
+            times=self.times,
+            Sxx=self._surface(kind),
+            kind=kind,
+            method="nufft",
+        )
+
+    def welch(
+        self,
+        kind: str = "psd",
+        average: str = "mean",
+    ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
+        surface = self._surface(kind)
+        if surface.shape[0] == 0:
+            return self.frequencies, np.array([], dtype=np.float64)
+        if average == "mean":
+            spectrum = np.nanmean(surface, axis=0)
+        elif average == "median":
+            spectrum = np.nanmedian(surface, axis=0)
+        else:
+            raise ValueError("average must be 'mean' or 'median'")
+        return self.frequencies, spectrum
 
 
 class ShortTimeFTResult:
@@ -228,7 +347,11 @@ class ShortTimeFTResult:
     @property
     def frequency_resolution(self) -> float:
         """Frequency resolution in Hz."""
-        return self.freqs[1] - self.freqs[0] if len(self.freqs) > 1 else 0.0
+        return (
+            self.frequencies[1] - self.frequencies[0]
+            if len(self.frequencies) > 1
+            else 0.0
+        )
 
     @property
     def time_resolution(self) -> float:
@@ -395,6 +518,133 @@ def resample_accelerometer_cubic_microseconds(
         z=result["z"],
     )
 
+def _timestamps_to_seconds(
+    timestamps: NDArray[np.float64],
+    ts_unit: str,
+) -> NDArray[np.float64]:
+    conversion = {"s": 1.0, "ms": 1e-3, "us": 1e-6}
+    if ts_unit not in conversion:
+        raise ValueError("ts_unit must be one of: 's', 'ms', 'us'")
+    return np.asarray(timestamps, dtype=np.float64) * conversion[ts_unit]
+
+
+def _validate_time_window(window_s: float, overlap_s: float) -> None:
+    if window_s <= 0:
+        raise ValueError("window_s must be > 0")
+    if overlap_s < 0 or overlap_s >= window_s:
+        raise ValueError("overlap_s must satisfy 0 <= overlap_s < window_s")
+
+
+def _validate_sample_window(nperseg: int, noverlap: int) -> None:
+    if nperseg <= 0:
+        raise ValueError("rounded window_s * target_fs must be at least 1 sample")
+    if noverlap < 0 or noverlap >= nperseg:
+        raise ValueError(
+            "rounded overlap_s * target_fs must satisfy 0 <= noverlap < nperseg"
+        )
+
+
+def compute_nustft(
+    timestamps: NDArray[np.float64],
+    signal: NDArray[np.float64],
+    window_s: float,
+    overlap_s: float,
+    ts_unit: str = "s",
+    target_fs: Optional[float] = None,
+) -> NUSTFTResult:
+    """Compute complex non-uniform STFT coefficients using FINUFFT.
+
+    This is the primary spectral primitive for jittered or otherwise
+    non-uniform timestamps. It bypasses time-domain resampling entirely.
+
+    Args:
+        timestamps: Sample timestamps, same length as ``signal``.
+        signal: 1-D signal values.
+        window_s: Window duration in seconds.
+        overlap_s: Window overlap in seconds.
+        ts_unit: Timestamp unit: ``"s"``, ``"ms"``, or ``"us"``.
+        target_fs: Optional output frequency-grid limit. If specified, output
+            bins span ``0`` through ``target_fs / 2`` with spacing
+            ``1 / window_s``.
+
+    Returns:
+        ``NUSTFTResult`` with complex coefficients shaped ``(n_times, n_freqs)``.
+    """
+    if len(timestamps) != len(signal):
+        raise ValueError("timestamps and signal must have the same length")
+    if len(timestamps) < 2:
+        raise ValueError("compute_nustft requires at least two timestamps")
+    _validate_time_window(window_s, overlap_s)
+    if target_fs is not None and target_fs < 0:
+        raise ValueError("target_fs must be >= 0")
+
+    t = _timestamps_to_seconds(timestamps, ts_unit)
+    target_fs_val = target_fs if target_fs is not None else 0.0
+
+    try:
+        result_dict = _senpy.compute_nustft(
+            t,
+            np.asarray(signal, dtype=np.float64),
+            float(window_s),
+            float(overlap_s),
+            float(target_fs_val),
+        )
+    except RuntimeError as e:
+        raise RuntimeError(f"C++ NUSTFT computation failed: {e}") from e
+
+    if len(result_dict["times"]) == 0 and len(result_dict["freqs"]) > 0:
+        raise ValueError("compute_nustft requires enough data for at least one window")
+
+    return NUSTFTResult(
+        frequencies=result_dict["freqs"],
+        times=result_dict["times"],
+        coefficients=result_dict["coefficients"],
+    )
+
+
+def compute_nufft_spectrogram(
+    timestamps: NDArray[np.float64],
+    signal: NDArray[np.float64],
+    window_s: float,
+    overlap_s: float,
+    ts_unit: str = "s",
+    target_fs: Optional[float] = None,
+    kind: str = "magnitude",
+) -> SpectrogramResult:
+    """Compute a FINUFFT-backed spectrogram from non-uniform samples.
+
+    This is a convenience wrapper over ``compute_nustft(...).spectrogram(kind)``.
+    Use ``compute_nustft`` when phase or custom spectral reductions are needed.
+    """
+    return compute_nustft(
+        timestamps=timestamps,
+        signal=signal,
+        window_s=window_s,
+        overlap_s=overlap_s,
+        ts_unit=ts_unit,
+        target_fs=target_fs,
+    ).spectrogram(kind=kind)
+
+
+def compute_nufft_welch(
+    timestamps: NDArray[np.float64],
+    signal: NDArray[np.float64],
+    window_s: float,
+    overlap_s: float,
+    ts_unit: str = "s",
+    target_fs: Optional[float] = None,
+    kind: str = "psd",
+    average: str = "mean",
+) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Compute a Welch-style average spectrum using FINUFFT windows."""
+    return compute_nustft(
+        timestamps=timestamps,
+        signal=signal,
+        window_s=window_s,
+        overlap_s=overlap_s,
+        ts_unit=ts_unit,
+        target_fs=target_fs,
+    ).welch(kind=kind, average=average)
 
 
 def compute_spectrogram_nufft(
@@ -405,72 +655,26 @@ def compute_spectrogram_nufft(
     ts_unit: str = "s",
     target_fs: Optional[float] = None,
 ) -> SpectrogramResult:
-    """Compute a spectrogram directly from non-uniformly sampled data
-    using the Non-Uniform FFT, bypassing time-domain resampling entirely.
+    """Compatibility alias for ``compute_nufft_spectrogram``.
 
-    For each STFT window the algorithm:
-
-    1. Selects the non-uniform samples falling within the window (fixed duration in seconds).
-    2. Applies a Hann window evaluated at the true sample times.
-    3. Computes the spectrum via type-1 NUFFT using finufft (via C++ backend).
-    4. Interpolates to a common frequency grid (if target_fs is specified).
-
-    Because no resampling interpolation is involved, the result is free
-    of the spectral artifacts that linear or spline resampling introduce
-    into the 0–10 Hz band.
-
-    Args:
-        timestamps: Sample timestamps (same length as *signal*).
-        signal: 1-D signal values (e.g. jerk magnitude).
-        secperseg: Window duration in seconds.
-        secoverlap: Overlap duration in seconds.
-        ts_unit: Timestamp unit — ``'s'``, ``'ms'``, or ``'us'``.
-        target_fs: If specified, interpolate output to a fixed frequency grid
-                   with this sampling rate. Frequency spacing will be 1/secperseg.
-                   Fmax will be target_fs/2.
-
-    Returns:
-        SpectrogramResult with *frequencies* (Hz), *times* (s), and
-        *Sxx* power spectral density array shaped ``(n_times, n_freqs)``.
-
-    Notes:
-        ``secperseg`` and ``secoverlap`` are durations, not sample counts.
-        This API is intentionally time-based because the input timestamps are
-        non-uniform.
+    Deprecated in senpy 1.0. Use ``compute_nustft`` for complex coefficients
+    or ``compute_nufft_spectrogram`` for an explicit derived surface.
     """
-    if len(timestamps) != len(signal):
-        raise ValueError("timestamps and signal must have the same length")
-
-    if len(timestamps) < 2:
-        raise ValueError("compute_spectrogram_nufft requires at least two timestamps")
-
-    if secperseg <= 0:
-        raise ValueError("secperseg must be > 0")
-
-    if secoverlap < 0 or secoverlap >= secperseg:
-        raise ValueError("secoverlap must satisfy 0 <= secoverlap < secperseg")
-
-    if target_fs is not None and target_fs < 0:
-        raise ValueError("target_fs must be >= 0")
-
-    # Convert timestamps to seconds if needed
-    conversion = {"s": 1.0, "ms": 1e-3, "us": 1e-6}.get(ts_unit, 1.0)
-    t = timestamps.astype(np.float64) * conversion
-
-    # Call C++ backend with optional target_fs for resampling
-    target_fs_val = target_fs if target_fs is not None else 0.0
-
-    try:
-        result_dict = _senpy.compute_spectrogram_nufft(
-            t, signal.astype(np.float64), secperseg, secoverlap, target_fs_val
-        )
-        return SpectrogramResult(
-            frequencies=result_dict["freqs"],
-            times=result_dict["times"],
-            Sxx=result_dict["Sxx"]
-        )
-    except RuntimeError as e:
-        raise RuntimeError(f"C++ NUFFT computation failed: {e}")
+    warnings.warn(
+        "compute_spectrogram_nufft is deprecated; use compute_nustft or "
+        "compute_nufft_spectrogram instead",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return compute_nufft_spectrogram(
+        timestamps=timestamps,
+        signal=signal,
+        window_s=secperseg,
+        overlap_s=secoverlap,
+        ts_unit=ts_unit,
+        target_fs=target_fs,
+        kind="magnitude",
+    )
 
 
 def compute_jerk(
@@ -563,11 +767,11 @@ def compute_magnitude(
     return _senpy.compute_magnitude(x, y, z)
 
 
-def compute_spectrogram(
+def compute_uniform_spectrogram(
     signal: NDArray[np.float64], fs: float, nperseg: int, noverlap: int
 ) -> SpectrogramResult:
     """
-    Compute spectrogram using FFT-based Short-Time Fourier Transform.
+    Compute a spectrogram for an already-uniform signal using FFT-based STFT.
 
     Args:
         signal: Input signal array
@@ -581,10 +785,70 @@ def compute_spectrogram(
     Note:
         Uses Hann window, constant detrending, and magnitude scaling compatible with scipy.
     """
-    result = _senpy.compute_spectrogram(signal, fs, nperseg, noverlap)
-    return SpectrogramResult(
-        frequencies=result["freqs"], times=result["times"], Sxx=result["Sxx"]
+    result = _senpy.compute_spectrogram(
+        np.asarray(signal, dtype=np.float64), fs, nperseg, noverlap
     )
+    return SpectrogramResult(
+        frequencies=result["freqs"],
+        times=result["times"],
+        Sxx=result["Sxx"],
+        kind="magnitude",
+        method="uniform_fft",
+    )
+
+
+def compute_resampled_spectrogram(
+    timestamps: NDArray[np.float64],
+    signal: NDArray[np.float64],
+    target_fs: float,
+    window_s: float,
+    overlap_s: float,
+    ts_unit: str = "s",
+    resample_method: str = "linear",
+) -> SpectrogramResult:
+    """Compute a legacy resample-then-FFT spectrogram for comparison.
+
+    This path performs time-domain interpolation before spectral analysis. It
+    remains available for compatibility and controlled comparisons, but
+    ``compute_nustft`` is preferred for non-uniform or jittered timestamps.
+    """
+    _validate_time_window(window_s, overlap_s)
+    if target_fs <= 0:
+        raise ValueError("target_fs must be > 0")
+    nperseg = int(round(window_s * target_fs))
+    noverlap = int(round(overlap_s * target_fs))
+    _validate_sample_window(nperseg, noverlap)
+
+    zeros = np.zeros_like(signal, dtype=np.float64)
+    if resample_method == "linear":
+        resampled = resample_accelerometer(
+            timestamps, signal, zeros, zeros, target_fs, ts_unit=ts_unit
+        )
+    elif resample_method == "cubic":
+        resampled = resample_accelerometer_cubic(
+            timestamps, signal, zeros, zeros, target_fs, ts_unit=ts_unit
+        )
+    else:
+        raise ValueError("resample_method must be 'linear' or 'cubic'")
+
+    return compute_uniform_spectrogram(resampled.x, target_fs, nperseg, noverlap)
+
+
+def compute_spectrogram(
+    signal: NDArray[np.float64], fs: float, nperseg: int, noverlap: int
+) -> SpectrogramResult:
+    """Compatibility alias for ``compute_uniform_spectrogram``.
+
+    Deprecated in senpy 1.0. This function assumes ``signal`` is already on a
+    uniform sample grid. For jittered timestamps, use ``compute_nustft``.
+    """
+    warnings.warn(
+        "compute_spectrogram is deprecated; use compute_uniform_spectrogram "
+        "for uniform signals or compute_nustft for non-uniform timestamps",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return compute_uniform_spectrogram(signal, fs, nperseg, noverlap)
 
 
 def compute_short_time_ft(
@@ -703,6 +967,8 @@ def compute_motion_features(
         frequencies=result["spectrogram"]["freqs"],
         times=result["spectrogram"]["times"],
         Sxx=result["spectrogram"]["Sxx"],
+        kind="magnitude",
+        method="uniform_fft",
     )
 
     return MotionFeatures(
@@ -887,10 +1153,9 @@ class SamplingRates:
     ACCELEROMETER_HIGH = 100.0  # Hz
 
 
-# Version info
-__version__ = "1.0.0"
 __all__ = [
     "AccelerometerData",
+    "NUSTFTResult",
     "SpectrogramResult",
     "JerkData",
     "ShortTimeFTResult",
@@ -898,9 +1163,14 @@ __all__ = [
     "resample_accelerometer",
     "resample_accelerometer_cubic",
     "resample_accelerometer_cubic_microseconds",
+    "compute_nustft",
+    "compute_nufft_spectrogram",
+    "compute_nufft_welch",
     "compute_spectrogram_nufft",
     "compute_jerk",
     "compute_magnitude",
+    "compute_uniform_spectrogram",
+    "compute_resampled_spectrogram",
     "compute_spectrogram",
     "compute_short_time_ft",
     "compute_motion_features",
