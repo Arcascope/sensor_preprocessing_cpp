@@ -36,5 +36,7 @@ def load_csv(name: str):
 def real_accel(request):
     """Parametrised fixture yielding (name, t, x, y, z) for each test CSV."""
     name = request.param
+    if not (DATA_DIR / name).exists():
+        pytest.skip(f"optional test data file not found: {name}")
     t, x, y, z = load_csv(name)
     return name, t, x, y, z

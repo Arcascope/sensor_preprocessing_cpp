@@ -24,6 +24,13 @@ struct SpectrogramResult
     std::vector<std::vector<double>> Sxx; // [times x frequencies]
 };
 
+struct NUSTFTResult
+{
+    std::vector<double> freqs;                                     // Hz
+    std::vector<double> times;                                     // Relative time in seconds
+    std::vector<std::vector<std::complex<double>>> coefficients;   // [times x frequencies]
+};
+
 struct MotionFeaturesResult
 {
     std::vector<std::vector<double>> features; // BR, HR, freqSum, BR_std, HR_std
@@ -292,11 +299,12 @@ public:
         return result;
     }
 
-    // Compute spectrogram from non-uniformly sampled data using NUFFT
+    // Compute complex short-time Fourier coefficients from non-uniformly
+    // sampled data using NUFFT.
     // Bypasses resampling to avoid spectral artifacts in the 0-10 Hz band
     // secperseg and secoverlap are in seconds (not samples)
     // target_fs: if > 0, resample output to fixed freq grid (fmax = target_fs/2, spacing = 1/secperseg)
-    static SpectrogramResult computeSpectrogramNUFFT(
+    static NUSTFTResult computeNUSTFT(
         const std::vector<double> &timestamps,
         const std::vector<double> &signal,
         double secperseg,
@@ -363,7 +371,7 @@ public:
 
         // Prepare output
         std::vector<double> window_centres;
-        std::vector<std::vector<double>> spectra;
+        std::vector<std::vector<std::complex<double>>> spectra;
 
         double t_start = timestamps[0];
         double t_end = timestamps[timestamps.size() - 1];
@@ -474,8 +482,8 @@ public:
 
             finufft_destroy(plan);
 
-            // Extract positive frequencies and compute PSD
-            std::vector<double> psd(n_pos_freqs);
+            // Extract positive frequencies and keep scaled complex coefficients.
+            std::vector<std::complex<double>> coeffs(n_pos_freqs);
             double win_ss = 0.0;
             for (size_t i = 0; i < hann.size(); ++i)
                 win_ss += hann[i] * hann[i];
@@ -487,37 +495,35 @@ public:
                 for (int k = 0; k < n_pos_freqs; ++k)
                 {
                     int idx = (k == n_pos_freqs - 1) ? 0 : (nfft_padded / 2 + k);
-                    double real = fhat_complex[idx].real();
-                    double imag = fhat_complex[idx].imag();
-                    psd[k] = std::sqrt(real * real + imag * imag) * scale_factor;
+                    coeffs[k] = fhat_complex[idx] * scale_factor;
                 }
             }
 
-            spectra.push_back(psd);
+            spectra.push_back(coeffs);
             window_centres.push_back(win_start + win_dur / 2.0);
 
             win_start += hop_dur;
         }
 
         // Build result
-        SpectrogramResult result;
+        NUSTFTResult result;
         result.freqs = freqs;
 
         if (spectra.empty())
         {
             result.times.clear();
-            result.Sxx.clear();
+            result.coefficients.clear();
         }
         else
         {
             result.times.resize(window_centres.size());
             for (size_t i = 0; i < window_centres.size(); ++i)
                 result.times[i] = window_centres[i] - t_start;
-            result.Sxx = spectra;
+            result.coefficients = spectra;
         }
 
         // If target_fs is specified, resample to a common frequency grid via cubic spline
-        if (target_fs > 0.0 && !result.Sxx.empty())
+        if (target_fs > 0.0 && !result.coefficients.empty())
         {
             double fmax = target_fs / 2.0;
             double freq_spacing = 1.0 / secperseg;
@@ -527,26 +533,60 @@ public:
             for (double f = 0; f <= fmax + freq_spacing / 2; f += freq_spacing)
                 target_freqs.push_back(f);
 
-            // Resample each time window using cubic spline
-            std::vector<std::vector<double>> resampled_Sxx(result.Sxx.size());
+            // Resample each time window using cubic spline on real and imaginary parts.
+            std::vector<std::vector<std::complex<double>>> resampled_coeffs(result.coefficients.size());
 
-            for (size_t t = 0; t < result.Sxx.size(); ++t)
+            for (size_t t = 0; t < result.coefficients.size(); ++t)
             {
-                const auto &psd_original = result.Sxx[t];
+                const auto &coeffs_original = result.coefficients[t];
+                std::vector<double> real_original(coeffs_original.size());
+                std::vector<double> imag_original(coeffs_original.size());
+                for (size_t f = 0; f < coeffs_original.size(); ++f)
+                {
+                    real_original[f] = coeffs_original[f].real();
+                    imag_original[f] = coeffs_original[f].imag();
+                }
 
                 // Compute cubic spline coefficients
                 std::vector<double> freqs_dbl(freqs.begin(), freqs.end());
-                auto coeffs = computeNaturalCubicSplineCoeffs(freqs_dbl, psd_original);
+                auto real_coeffs = computeNaturalCubicSplineCoeffs(freqs_dbl, real_original);
+                auto imag_coeffs = computeNaturalCubicSplineCoeffs(freqs_dbl, imag_original);
 
                 // Evaluate at target frequencies
-                auto resampled = evaluateCubicSpline(freqs_dbl, psd_original, coeffs, target_freqs);
-                resampled_Sxx[t] = resampled;
+                auto real_resampled = evaluateCubicSpline(freqs_dbl, real_original, real_coeffs, target_freqs);
+                auto imag_resampled = evaluateCubicSpline(freqs_dbl, imag_original, imag_coeffs, target_freqs);
+
+                resampled_coeffs[t].resize(target_freqs.size());
+                for (size_t f = 0; f < target_freqs.size(); ++f)
+                    resampled_coeffs[t][f] = std::complex<double>(real_resampled[f], imag_resampled[f]);
             }
 
             result.freqs = target_freqs;
-            result.Sxx = resampled_Sxx;
+            result.coefficients = resampled_coeffs;
         }
 
+        return result;
+    }
+
+    static SpectrogramResult computeSpectrogramNUFFT(
+        const std::vector<double> &timestamps,
+        const std::vector<double> &signal,
+        double secperseg,
+        double secoverlap,
+        double target_fs = 0.0)
+    {
+        auto stft = computeNUSTFT(timestamps, signal, secperseg, secoverlap, target_fs);
+
+        SpectrogramResult result;
+        result.freqs = std::move(stft.freqs);
+        result.times = std::move(stft.times);
+        result.Sxx.assign(stft.coefficients.size(), std::vector<double>());
+        for (size_t t = 0; t < stft.coefficients.size(); ++t)
+        {
+            result.Sxx[t].resize(stft.coefficients[t].size());
+            for (size_t f = 0; f < stft.coefficients[t].size(); ++f)
+                result.Sxx[t][f] = std::abs(stft.coefficients[t][f]);
+        }
         return result;
     }
 
@@ -1483,8 +1523,8 @@ extern "C"
 
         auto result = SensorProcessor::computeSpectrogram(signal_vec, fs, nperseg, noverlap);
 
-        int n_freqs = result.freqs.size();
-        int n_times = result.times.size();
+        int n_times = result.Sxx.size();
+        int n_freqs = n_times > 0 ? result.Sxx[0].size() : 0;
 
         *out_n_freqs = n_freqs;
         *out_n_times = n_times;
@@ -1504,11 +1544,11 @@ extern "C"
         // Copy times
         std::copy(result.times.begin(), result.times.end(), output + n_freqs);
 
-        // Copy Sxx (flattened)
+        // Copy Sxx flattened as time-major: Sxx[t, f].
         double *sxx_ptr = output + n_freqs + n_times;
-        for (int f = 0; f < n_freqs; ++f)
+        for (int t = 0; t < n_times; ++t)
         {
-            std::copy(result.Sxx[f].begin(), result.Sxx[f].end(), sxx_ptr + (f * n_times));
+            std::copy(result.Sxx[t].begin(), result.Sxx[t].end(), sxx_ptr + (t * n_freqs));
         }
 
         return output;
@@ -1766,18 +1806,18 @@ py::dict computeSpectrogram_wrapper(
     std::copy(result.times.begin(), result.times.end(),
               static_cast<double *>(times.request().ptr));
 
-    // Convert Sxx to 2D NumPy array (freqs x times)
-    size_t n_freqs = result.Sxx.size();
-    size_t n_times = result.Sxx[0].size();
-    py::array_t<double> Sxx({n_freqs, n_times});
+    // Convert Sxx to 2D NumPy array (times x freqs)
+    size_t n_times = result.Sxx.size();
+    size_t n_freqs = (n_times > 0) ? result.Sxx[0].size() : 0;
+    py::array_t<double> Sxx({n_times, n_freqs});
     auto Sxx_buf = Sxx.request();
     double *Sxx_ptr = static_cast<double *>(Sxx_buf.ptr);
 
-    for (size_t f = 0; f < n_freqs; ++f)
+    for (size_t t = 0; t < n_times; ++t)
     {
-        for (size_t t = 0; t < n_times; ++t)
+        for (size_t f = 0; f < n_freqs; ++f)
         {
-            Sxx_ptr[f * n_times + t] = result.Sxx[f][t];
+            Sxx_ptr[t * n_freqs + f] = result.Sxx[t][f];
         }
     }
 
@@ -1785,6 +1825,61 @@ py::dict computeSpectrogram_wrapper(
     result_dict["freqs"] = freqs;
     result_dict["times"] = times;
     result_dict["Sxx"] = Sxx;
+
+    return result_dict;
+}
+
+py::dict computeNUSTFT_wrapper(
+    py::array_t<double> timestamps,
+    py::array_t<double> signal,
+    double secperseg,
+    double secoverlap,
+    double target_fs = 0.0)
+{
+    auto ts_buf = timestamps.request();
+    auto sig_buf = signal.request();
+
+    if (ts_buf.size != sig_buf.size)
+    {
+        throw std::runtime_error("timestamps and signal must have the same length");
+    }
+
+    std::vector<double> timestamps_vec(static_cast<double *>(ts_buf.ptr),
+                                       static_cast<double *>(ts_buf.ptr) + ts_buf.size);
+    std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
+                                   static_cast<double *>(sig_buf.ptr) + sig_buf.size);
+
+    auto result = SensorProcessor::computeNUSTFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs);
+
+    py::array_t<double> freqs(result.freqs.size());
+    std::copy(result.freqs.begin(), result.freqs.end(),
+              static_cast<double *>(freqs.request().ptr));
+
+    py::array_t<double> times(result.times.size());
+    std::copy(result.times.begin(), result.times.end(),
+              static_cast<double *>(times.request().ptr));
+
+    size_t n_times = result.coefficients.size();
+    size_t n_freqs = (n_times > 0) ? result.coefficients[0].size() : 0;
+    py::array_t<std::complex<double>> coefficients({n_times, n_freqs});
+
+    if (n_times > 0 && n_freqs > 0)
+    {
+        auto coeff_buf = coefficients.request();
+        auto *coeff_ptr = static_cast<std::complex<double> *>(coeff_buf.ptr);
+        for (size_t t = 0; t < n_times; ++t)
+        {
+            for (size_t f = 0; f < n_freqs; ++f)
+            {
+                coeff_ptr[t * n_freqs + f] = result.coefficients[t][f];
+            }
+        }
+    }
+
+    py::dict result_dict;
+    result_dict["freqs"] = freqs;
+    result_dict["times"] = times;
+    result_dict["coefficients"] = coefficients;
 
     return result_dict;
 }
@@ -1932,17 +2027,17 @@ py::dict computeMotionFeatures_wrapper(
     std::copy(result.spectrogram.times.begin(), result.spectrogram.times.end(),
               static_cast<double *>(times.request().ptr));
 
-    size_t n_freqs = result.spectrogram.Sxx.size();
-    size_t n_times = result.spectrogram.Sxx[0].size();
-    py::array_t<double> Sxx({n_freqs, n_times});
+    size_t n_times = result.spectrogram.Sxx.size();
+    size_t n_freqs = (n_times > 0) ? result.spectrogram.Sxx[0].size() : 0;
+    py::array_t<double> Sxx({n_times, n_freqs});
     auto Sxx_buf = Sxx.request();
     double *Sxx_ptr = static_cast<double *>(Sxx_buf.ptr);
 
-    for (size_t f = 0; f < n_freqs; ++f)
+    for (size_t t = 0; t < n_times; ++t)
     {
-        for (size_t t = 0; t < n_times; ++t)
+        for (size_t f = 0; f < n_freqs; ++f)
         {
-            Sxx_ptr[f * n_times + t] = result.spectrogram.Sxx[f][t];
+            Sxx_ptr[t * n_freqs + f] = result.spectrogram.Sxx[t][f];
         }
     }
 
@@ -2133,6 +2228,14 @@ PYBIND11_MODULE(_core, m)
 
     m.def("compute_spectrogram_nufft", &computeSpectrogramNUFFT_wrapper,
           "Compute spectrogram from non-uniformly sampled data using finufft",
+          py::arg("timestamps"),
+          py::arg("signal"),
+          py::arg("secperseg"),
+          py::arg("secoverlap"),
+          py::arg("target_fs") = 0.0);
+
+    m.def("compute_nustft", &computeNUSTFT_wrapper,
+          "Compute complex NUSTFT coefficients from non-uniformly sampled data using finufft",
           py::arg("timestamps"),
           py::arg("signal"),
           py::arg("secperseg"),

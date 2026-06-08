@@ -17,6 +17,9 @@ class get_pybind_include(object):
 # resolve directories relative to this file
 ROOT_DIR = os.path.dirname(__file__)
 CPP_DIR = os.path.join(ROOT_DIR, '..', 'src')
+version_ns = {}
+with open(os.path.join(ROOT_DIR, "_version.py"), encoding="utf-8") as f:
+    exec(f.read(), version_ns)
 
 # explicit binding file in this directory — must stay as a plain relative string
 # (setuptools rejects absolute paths; os.path.abspath would break in pip's temp build dir)
@@ -117,7 +120,7 @@ ext_modules = [
 
 setup(
     name='senpy',
-    version='0.3.0',
+    version=version_ns["__version__"],
     author='Eric Canton and Franco Tavella',
     description='Fast sensor processing with FFT-based signal analysis',
     long_description='',
@@ -126,7 +129,7 @@ setup(
     package_dir={'senpy': '.'},  # The senpy package is in the current directory
     package_data={'senpy': ['*.so', '*.dylib', '*.dll']},
     include_package_data=True,
-    py_modules=['senpy', 'senpy.api', "senpy._core"],
+    py_modules=['senpy', 'senpy.api', 'senpy._version', "senpy._core"],
     install_requires=['pybind11>=2.6.0', 'numpy>=1.19.0'],
     setup_requires=['pybind11>=2.6.0'],
     cmdclass={'build_ext': SenpyBuildExt},
