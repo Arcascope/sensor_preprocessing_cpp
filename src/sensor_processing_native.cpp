@@ -5,8 +5,10 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cctype>
 #include <algorithm>
 #include <numeric>
+#include <string>
 
 #include <finufft.h>
 
@@ -309,7 +311,8 @@ public:
         const std::vector<double> &signal,
         double secperseg,
         double secoverlap,
-        double target_fs = 0.0)
+        double target_fs = 0.0,
+        bool detrend = true)
     {
         if (timestamps.size() != signal.size())
             throw std::runtime_error("timestamps and signal must have the same length");
@@ -429,11 +432,14 @@ public:
             std::vector<double> tau(t_win.size());
             std::vector<double> hann(t_win.size());
             double s_mean = 0.0;
-            for (size_t i = 0; i < s_win.size(); ++i)
-                s_mean += s_win[i];
-            s_mean /= s_win.size();
+            if (detrend)
+            {
+                for (size_t i = 0; i < s_win.size(); ++i)
+                    s_mean += s_win[i];
+                s_mean /= s_win.size();
+            }
 
-            // Apply Hann window and detrend
+            // Apply Hann window and optional constant detrending
             for (size_t i = 0; i < t_win.size(); ++i)
             {
                 tau[i] = (t_win[i] - win_start) / win_dur;
@@ -574,9 +580,19 @@ public:
         const std::vector<double> &signal,
         double secperseg,
         double secoverlap,
-        double target_fs = 0.0)
+        double target_fs = 0.0,
+        const std::string &kind = "magnitude",
+        bool detrend = true)
     {
-        auto stft = computeNUSTFT(timestamps, signal, secperseg, secoverlap, target_fs);
+        auto stft = computeNUSTFT(timestamps, signal, secperseg, secoverlap, target_fs, detrend);
+        std::string normalized_kind = kind;
+        std::replace(normalized_kind.begin(), normalized_kind.end(), '-', '_');
+        std::transform(normalized_kind.begin(), normalized_kind.end(), normalized_kind.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (normalized_kind == "mag")
+            normalized_kind = "magnitude";
+        if (normalized_kind != "magnitude" && normalized_kind != "power" && normalized_kind != "psd")
+            throw std::runtime_error("kind must be one of: 'mag', 'magnitude', 'power', 'psd'");
 
         SpectrogramResult result;
         result.freqs = std::move(stft.freqs);
@@ -586,7 +602,10 @@ public:
         {
             result.Sxx[t].resize(stft.coefficients[t].size());
             for (size_t f = 0; f < stft.coefficients[t].size(); ++f)
-                result.Sxx[t][f] = std::abs(stft.coefficients[t][f]);
+            {
+                double magnitude = std::abs(stft.coefficients[t][f]);
+                result.Sxx[t][f] = (normalized_kind == "magnitude") ? magnitude : magnitude * magnitude;
+            }
         }
         return result;
     }
@@ -1835,7 +1854,8 @@ py::dict computeNUSTFT_wrapper(
     py::array_t<double> signal,
     double secperseg,
     double secoverlap,
-    double target_fs = 0.0)
+    double target_fs = 0.0,
+    bool detrend = true)
 {
     auto ts_buf = timestamps.request();
     auto sig_buf = signal.request();
@@ -1850,7 +1870,7 @@ py::dict computeNUSTFT_wrapper(
     std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
                                    static_cast<double *>(sig_buf.ptr) + sig_buf.size);
 
-    auto result = SensorProcessor::computeNUSTFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs);
+    auto result = SensorProcessor::computeNUSTFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs, detrend);
 
     py::array_t<double> freqs(result.freqs.size());
     std::copy(result.freqs.begin(), result.freqs.end(),
@@ -1925,7 +1945,9 @@ py::dict computeSpectrogramNUFFT_wrapper(
     py::array_t<double> signal,
     double secperseg,
     double secoverlap,
-    double target_fs = 0.0)
+    double target_fs = 0.0,
+    const std::string &kind = "magnitude",
+    bool detrend = true)
 {
     auto ts_buf = timestamps.request();
     auto sig_buf = signal.request();
@@ -1940,7 +1962,7 @@ py::dict computeSpectrogramNUFFT_wrapper(
     std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
                                    static_cast<double *>(sig_buf.ptr) + sig_buf.size);
 
-    auto result = SensorProcessor::computeSpectrogramNUFFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs);
+    auto result = SensorProcessor::computeSpectrogramNUFFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs, kind, detrend);
 
     // Convert frequencies to NumPy array
     py::array_t<double> freqs(result.freqs.size());
@@ -2233,7 +2255,9 @@ PYBIND11_MODULE(_core, m)
           py::arg("signal"),
           py::arg("secperseg"),
           py::arg("secoverlap"),
-          py::arg("target_fs") = 0.0);
+          py::arg("target_fs") = 0.0,
+          py::arg("kind") = "magnitude",
+          py::arg("detrend") = true);
 
     m.def("compute_nustft", &computeNUSTFT_wrapper,
           "Compute complex NUSTFT coefficients from non-uniformly sampled data using finufft",
@@ -2241,7 +2265,8 @@ PYBIND11_MODULE(_core, m)
           py::arg("signal"),
           py::arg("secperseg"),
           py::arg("secoverlap"),
-          py::arg("target_fs") = 0.0);
+          py::arg("target_fs") = 0.0,
+          py::arg("detrend") = true);
 
     m.def("compute_short_time_ft", &computeShortTimeFT_wrapper,
           "Compute Short-Time Fourier Transform returning complex values (n_times, n_frequencies, 2)",

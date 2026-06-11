@@ -182,6 +182,30 @@ def test_nustft_spectrogram_and_welch_are_derived_from_coefficients():
     np.testing.assert_allclose(welch_psd, np.mean(result.psd, axis=0))
 
 
+def test_nustft_accepts_mag_alias_and_power_kind():
+    t, signal = _jittered_tone()
+    result = sp.compute_nustft(t, signal, window_s=8.0, overlap_s=4.0, target_fs=16.0)
+
+    mag = result.spectrogram(kind="mag")
+    power = result.spectrogram(kind="power")
+
+    assert mag.kind == "magnitude"
+    np.testing.assert_allclose(mag.Sxx, np.abs(result.coefficients))
+    np.testing.assert_allclose(power.Sxx, mag.Sxx ** 2)
+
+
+def test_nustft_detrend_false_preserves_dc_offset():
+    window_s = 8.0
+    t = _single_window_times(duration_s=window_s, fs=32.0)
+    signal = np.full_like(t, 3.0)
+
+    detrended = sp.compute_nustft(t, signal, window_s=window_s, overlap_s=0.0, detrend=True)
+    raw = sp.compute_nustft(t, signal, window_s=window_s, overlap_s=0.0, detrend=False)
+
+    np.testing.assert_allclose(detrended.coefficients, 0.0, atol=1e-12)
+    assert abs(raw.coefficients[0, 0]) > 1.0
+
+
 def test_nufft_spectrogram_convenience_resolves_known_tone():
     t, signal = _jittered_tone(freq_hz=3.0)
 

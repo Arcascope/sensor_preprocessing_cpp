@@ -16,6 +16,14 @@ from ._version import __version__
 AXIS_ORDER_TIME_FREQUENCY = "time_frequency"
 
 
+def _normalize_spectral_kind(kind: str) -> str:
+    normalized = str(kind).replace("-", "_").lower()
+    aliases = {"mag": "magnitude", "magnitude": "magnitude", "power": "power", "psd": "psd"}
+    if normalized not in aliases:
+        raise ValueError("kind must be one of: 'mag', 'magnitude', 'power', 'psd'")
+    return aliases[normalized]
+
+
 # Add a simple test function to verify imports work
 def test_import():
     """Test function to verify the C++ module is loaded."""
@@ -249,13 +257,12 @@ class NUSTFTResult:
         return self.power
 
     def _surface(self, kind: str) -> NDArray[np.float64]:
+        kind = _normalize_spectral_kind(kind)
         if kind == "magnitude":
             return self.magnitude
         if kind == "power":
             return self.power
-        if kind == "psd":
-            return self.psd
-        raise ValueError("kind must be one of: 'magnitude', 'power', 'psd'")
+        return self.psd
 
     def spectrogram(self, kind: str = "psd") -> SpectrogramResult:
         """Return a derived real-valued spectral surface.
@@ -268,7 +275,7 @@ class NUSTFTResult:
             frequencies=self.frequencies,
             times=self.times,
             Sxx=self._surface(kind),
-            kind=kind,
+            kind=_normalize_spectral_kind(kind),
             method="nufft",
         )
 
@@ -551,6 +558,7 @@ def compute_nustft(
     overlap_s: float,
     ts_unit: str = "s",
     target_fs: Optional[float] = None,
+    detrend: bool = True,
 ) -> NUSTFTResult:
     """Compute complex non-uniform STFT coefficients using FINUFFT.
 
@@ -566,6 +574,8 @@ def compute_nustft(
         target_fs: Optional output frequency-grid limit. If specified, output
             bins span ``0`` through ``target_fs / 2`` with spacing
             ``1 / window_s``.
+        detrend: If true, subtract each window's mean before applying the Hann
+            taper. Set false to preserve DC/low-frequency offsets.
 
     Returns:
         ``NUSTFTResult`` with complex coefficients shaped ``(n_times, n_freqs)``.
@@ -588,6 +598,7 @@ def compute_nustft(
             float(window_s),
             float(overlap_s),
             float(target_fs_val),
+            bool(detrend),
         )
     except RuntimeError as e:
         raise RuntimeError(f"C++ NUSTFT computation failed: {e}") from e
@@ -610,6 +621,7 @@ def compute_nufft_spectrogram(
     ts_unit: str = "s",
     target_fs: Optional[float] = None,
     kind: str = "magnitude",
+    detrend: bool = True,
 ) -> SpectrogramResult:
     """Compute a FINUFFT-backed spectrogram from non-uniform samples.
 
@@ -623,6 +635,7 @@ def compute_nufft_spectrogram(
         overlap_s=overlap_s,
         ts_unit=ts_unit,
         target_fs=target_fs,
+        detrend=detrend,
     ).spectrogram(kind=kind)
 
 
@@ -635,6 +648,7 @@ def compute_nufft_welch(
     target_fs: Optional[float] = None,
     kind: str = "psd",
     average: str = "mean",
+    detrend: bool = True,
 ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Compute a Welch-style average spectrum using FINUFFT windows."""
     return compute_nustft(
@@ -644,6 +658,7 @@ def compute_nufft_welch(
         overlap_s=overlap_s,
         ts_unit=ts_unit,
         target_fs=target_fs,
+        detrend=detrend,
     ).welch(kind=kind, average=average)
 
 
