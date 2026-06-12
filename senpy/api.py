@@ -4,7 +4,7 @@ This module is an interface. The Python bindings already exist, but one must rea
 """
 
 import warnings
-from typing import List, Tuple, Union, Optional
+from typing import Dict, List, Tuple, Union, Optional
 import numpy as np
 from numpy.typing import NDArray
 
@@ -271,11 +271,12 @@ class NUSTFTResult:
         workflow. Compatibility wrappers such as ``compute_nufft_spectrogram``
         may choose ``"magnitude"`` to preserve older return-value expectations.
         """
+        kind = _normalize_spectral_kind(kind)
         return SpectrogramResult(
             frequencies=self.frequencies,
             times=self.times,
             Sxx=self._surface(kind),
-            kind=_normalize_spectral_kind(kind),
+            kind=kind,
             method="nufft",
         )
 
@@ -325,10 +326,11 @@ class StackedSpectrogramResult:
         self.kind = kind
         if self.Sxx.ndim != 3:
             raise ValueError("Sxx must be a 3-D array shaped (n_times, n_freqs, n_channels)")
-        if self.Sxx.shape[2] != len(self.channels):
+        expected = (len(self.times), len(self.frequencies), len(self.channels))
+        if self.Sxx.shape != expected:
             raise ValueError(
-                f"Sxx.shape[2]={self.Sxx.shape[2]} does not match "
-                f"len(channels)={len(self.channels)}"
+                f"Sxx.shape={self.Sxx.shape} does not match "
+                f"(n_times={expected[0]}, n_freqs={expected[1]}, n_channels={expected[2]})"
             )
 
     @property
@@ -749,9 +751,12 @@ def compute_stacked_spectrograms(
     _validate_time_window(window_s, overlap_s)
     t_s = accel.timestamps_s
 
-    def _spec(signal: NDArray[np.float64]) -> SpectrogramResult:
+    def _spec(
+        signal: NDArray[np.float64],
+        timestamps: NDArray[np.float64] = t_s,
+    ) -> SpectrogramResult:
         return compute_nufft_spectrogram(
-            timestamps=t_s,
+            timestamps=timestamps,
             signal=np.ascontiguousarray(signal, dtype=np.float64),
             window_s=window_s,
             overlap_s=overlap_s,
@@ -760,7 +765,7 @@ def compute_stacked_spectrograms(
             detrend=detrend,
         )
 
-    channel_specs: dict = {}
+    channel_specs: Dict[str, SpectrogramResult] = {}
     for ch in channels:
         if ch == "x":
             channel_specs["x"] = _spec(accel.x)
@@ -779,15 +784,7 @@ def compute_stacked_spectrograms(
                 ts_unit="s",
                 use_diff=use_diff,
             )
-            channel_specs["jerk"] = compute_nufft_spectrogram(
-                timestamps=jerk_data.timestamps_s,
-                signal=np.ascontiguousarray(jerk_data.jerk, dtype=np.float64),
-                window_s=window_s,
-                overlap_s=overlap_s,
-                target_fs=target_fs,
-                kind=kind,
-                detrend=detrend,
-            )
+            channel_specs["jerk"] = _spec(jerk_data.jerk, timestamps=jerk_data.timestamps_s)
         else:
             raise ValueError(
                 f"Unknown channel {ch!r}. Must be one of: {STACKED_SPECTROGRAM_CHANNELS}"
@@ -809,11 +806,17 @@ def compute_stacked_spectrograms(
             Sxx[:, :, i] = spec.Sxx
         else:
             Sxx[:, :, i] = np.nan
-            for j, t_ref in enumerate(ref_times):
-                dists = np.abs(spec.times - t_ref)
-                k = int(np.argmin(dists))
-                if dists[k] <= tol:
-                    Sxx[j, :, i] = spec.Sxx[k]
+            n = len(spec.times)
+            if n > 0:
+                idx = np.searchsorted(spec.times, ref_times)
+                left = np.clip(idx - 1, 0, n - 1)
+                right = np.clip(idx, 0, n - 1)
+                left_dists = np.abs(spec.times[left] - ref_times)
+                right_dists = np.abs(spec.times[right] - ref_times)
+                best = np.where(left_dists <= right_dists, left, right)
+                best_dists = np.minimum(left_dists, right_dists)
+                mask = best_dists <= tol
+                Sxx[mask, :, i] = spec.Sxx[best[mask]]
 
     return StackedSpectrogramResult(
         frequencies=frequencies,
