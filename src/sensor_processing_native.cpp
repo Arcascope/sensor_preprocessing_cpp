@@ -526,7 +526,7 @@ public:
             result.times.resize(window_centres.size());
             for (size_t i = 0; i < window_centres.size(); ++i)
                 result.times[i] = window_centres[i] - t_start;
-            result.coefficients = spectra;
+            result.coefficients = std::move(spectra);
         }
 
         // If target_fs is specified, resample to a common frequency grid via cubic spline
@@ -542,6 +542,7 @@ public:
 
             // Resample each time window using cubic spline on real and imaginary parts.
             std::vector<std::vector<std::complex<double>>> resampled_coeffs(result.coefficients.size());
+            const std::vector<double> &freqs_dbl = result.freqs;
 
             for (size_t t = 0; t < result.coefficients.size(); ++t)
             {
@@ -555,7 +556,6 @@ public:
                 }
 
                 // Compute cubic spline coefficients
-                std::vector<double> freqs_dbl(freqs.begin(), freqs.end());
                 auto real_coeffs = computeNaturalCubicSplineCoeffs(freqs_dbl, real_original);
                 auto imag_coeffs = computeNaturalCubicSplineCoeffs(freqs_dbl, imag_original);
 
@@ -568,8 +568,8 @@ public:
                     resampled_coeffs[t][f] = std::complex<double>(real_resampled[f], imag_resampled[f]);
             }
 
-            result.freqs = target_freqs;
-            result.coefficients = resampled_coeffs;
+            result.freqs = std::move(target_freqs);
+            result.coefficients = std::move(resampled_coeffs);
         }
 
         return result;

@@ -671,18 +671,43 @@ def compute_nufft_spectrogram(
 ) -> SpectrogramResult:
     """Compute a FINUFFT-backed spectrogram from non-uniform samples.
 
-    This is a convenience wrapper over ``compute_nustft(...).spectrogram(kind)``.
     Use ``compute_nustft`` when phase or custom spectral reductions are needed.
     """
-    return compute_nustft(
-        timestamps=timestamps,
-        signal=signal,
-        window_s=window_s,
-        overlap_s=overlap_s,
-        ts_unit=ts_unit,
-        target_fs=target_fs,
-        detrend=detrend,
-    ).spectrogram(kind=kind)
+    if len(timestamps) != len(signal):
+        raise ValueError("timestamps and signal must have the same length")
+    if len(timestamps) < 2:
+        raise ValueError("compute_nufft_spectrogram requires at least two timestamps")
+    _validate_time_window(window_s, overlap_s)
+    if target_fs is not None and target_fs < 0:
+        raise ValueError("target_fs must be >= 0")
+
+    t = _timestamps_to_seconds(timestamps, ts_unit)
+    target_fs_val = target_fs if target_fs is not None else 0.0
+    normalized_kind = _normalize_spectral_kind(kind)
+
+    try:
+        result = _senpy.compute_spectrogram_nufft(
+            t,
+            np.asarray(signal, dtype=np.float64),
+            float(window_s),
+            float(overlap_s),
+            float(target_fs_val),
+            normalized_kind,
+            bool(detrend),
+        )
+    except RuntimeError as e:
+        raise RuntimeError(f"C++ NUFFT spectrogram computation failed: {e}") from e
+
+    if len(result["times"]) == 0 and len(result["freqs"]) > 0:
+        raise ValueError("compute_nufft_spectrogram requires enough data for at least one window")
+
+    return SpectrogramResult(
+        frequencies=result["freqs"],
+        times=result["times"],
+        Sxx=result["Sxx"],
+        method="nufft",
+        kind=normalized_kind,
+    )
 
 
 def compute_nufft_welch(
