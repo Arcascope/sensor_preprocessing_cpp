@@ -318,7 +318,7 @@ public:
             throw std::runtime_error("timestamps and signal must have the same length");
 
         if (timestamps.size() < 2)
-            throw std::runtime_error("compute_spectrogram_nufft requires at least two timestamps");
+            throw std::runtime_error("compute_nustft requires at least two timestamps");
 
         if (!(secperseg > 0.0))
             throw std::runtime_error("secperseg must be > 0");
@@ -575,7 +575,7 @@ public:
         return result;
     }
 
-    static SpectrogramResult computeSpectrogramNUFFT(
+    static SpectrogramResult computeNUFFTSpectrogram(
         const std::vector<double> &timestamps,
         const std::vector<double> &signal,
         double secperseg,
@@ -1940,7 +1940,7 @@ py::array_t<double> computeShortTimeFT_wrapper(
     return output;
 }
 
-py::dict computeSpectrogramNUFFT_wrapper(
+py::dict computeNUFFTSpectrogram_wrapper(
     py::array_t<double> timestamps,
     py::array_t<double> signal,
     double secperseg,
@@ -1962,7 +1962,7 @@ py::dict computeSpectrogramNUFFT_wrapper(
     std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
                                    static_cast<double *>(sig_buf.ptr) + sig_buf.size);
 
-    auto result = SensorProcessor::computeSpectrogramNUFFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs, kind, detrend);
+    auto result = SensorProcessor::computeNUFFTSpectrogram(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs, kind, detrend);
 
     // Convert frequencies to NumPy array
     py::array_t<double> freqs(result.freqs.size());
@@ -2249,7 +2249,7 @@ PYBIND11_MODULE(_core, m)
           py::arg("nperseg"),
           py::arg("noverlap"));
 
-    m.def("compute_spectrogram_nufft", &computeSpectrogramNUFFT_wrapper,
+    m.def("compute_nufft_spectrogram", &computeNUFFTSpectrogram_wrapper,
           "Compute spectrogram from non-uniformly sampled data using finufft",
           py::arg("timestamps"),
           py::arg("signal"),

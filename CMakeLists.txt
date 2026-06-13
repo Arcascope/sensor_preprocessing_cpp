@@ -66,8 +66,8 @@ add_library(sensor_processing SHARED
 # Set library properties
 set_target_properties(sensor_processing PROPERTIES
     CXX_VISIBILITY_PRESET default
-    VERSION 1.0.0
-    SOVERSION 1
+    VERSION 2.0.0
+    SOVERSION 2
 )
 
 # Include directories

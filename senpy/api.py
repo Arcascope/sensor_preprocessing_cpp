@@ -686,7 +686,7 @@ def compute_nufft_spectrogram(
     normalized_kind = _normalize_spectral_kind(kind)
 
     try:
-        result = _senpy.compute_spectrogram_nufft(
+        result = _senpy.compute_nufft_spectrogram(
             t,
             np.asarray(signal, dtype=np.float64),
             float(window_s),
@@ -849,36 +849,6 @@ def compute_stacked_spectrograms(
         Sxx=Sxx,
         channels=channels,
         kind=_normalize_spectral_kind(kind),
-    )
-
-
-def compute_spectrogram_nufft(
-    timestamps: NDArray[np.float64],
-    signal: NDArray[np.float64],
-    secperseg: float,
-    secoverlap: float,
-    ts_unit: str = "s",
-    target_fs: Optional[float] = None,
-) -> SpectrogramResult:
-    """Compatibility alias for ``compute_nufft_spectrogram``.
-
-    Deprecated in senpy 1.0. Use ``compute_nustft`` for complex coefficients
-    or ``compute_nufft_spectrogram`` for an explicit derived surface.
-    """
-    warnings.warn(
-        "compute_spectrogram_nufft is deprecated; use compute_nustft or "
-        "compute_nufft_spectrogram instead",
-        FutureWarning,
-        stacklevel=2,
-    )
-    return compute_nufft_spectrogram(
-        timestamps=timestamps,
-        signal=signal,
-        window_s=secperseg,
-        overlap_s=secoverlap,
-        ts_unit=ts_unit,
-        target_fs=target_fs,
-        kind="magnitude",
     )
 
 
@@ -1374,7 +1344,6 @@ __all__ = [
     "compute_nufft_spectrogram",
     "compute_nufft_welch",
     "compute_stacked_spectrograms",
-    "compute_spectrogram_nufft",
     "compute_jerk",
     "compute_magnitude",
     "compute_uniform_spectrogram",
