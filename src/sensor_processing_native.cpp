@@ -604,6 +604,20 @@ public:
             for (size_t f = 0; f < stft.coefficients[t].size(); ++f)
             {
                 double magnitude = std::abs(stft.coefficients[t][f]);
+                // Intentional: both "power" and "psd" map to magnitude^2 -- they
+                // are the same array, NOT a missing normalization. The density
+                // scaling (1 / sqrt(fs * Sum(w^2)), sample rate times Hann window
+                // energy) is already applied to the coefficients in computeNUSTFT
+                // above, so magnitude^2 = |X|^2 / (fs * Sum(w^2)) already carries
+                // units^2/Hz -- exactly scipy's welch(scaling="density"). Do NOT
+                // additionally divide by df; that double-counts and is the wrong
+                // normalization (a PSD needs /(fs*Sum(w^2)), not /df).
+                //
+                // Difference from scipy: scipy's one-sided density multiplies all
+                // bins except DC/Nyquist by 2 so integrating over [0, fs/2]
+                // recovers signal variance. We deliberately omit that x2 folding
+                // factor -- this is our convention. Matches Python
+                // NUSTFTResult.psd. Do not "fix" to match scipy.
                 result.Sxx[t][f] = (normalized_kind == "magnitude") ? magnitude : magnitude * magnitude;
             }
         }

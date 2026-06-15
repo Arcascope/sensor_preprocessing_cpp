@@ -254,6 +254,19 @@ class NUSTFTResult:
 
     @property
     def psd(self) -> NDArray[np.float64]:
+        # Intentional: "psd" equals "power" and is NOT a missing normalization.
+        # The density scaling (1 / sqrt(fs * Σw²), the sample rate times Hann
+        # window energy) is already baked into the complex coefficients in the
+        # C++ layer, so power = |X|² / (fs * Σw²) already carries units²/Hz --
+        # exactly scipy's welch(scaling="density") formula. Do NOT additionally
+        # divide by df (the frequency step); that would double-count and is the
+        # wrong normalization anyway (a PSD needs ÷(fs·Σw²), not ÷df).
+        #
+        # Difference from scipy: scipy's one-sided density multiplies every bin
+        # except DC/Nyquist by 2 so integrating over [0, fs/2] recovers signal
+        # variance. We deliberately omit that ×2 folding factor -- this is our
+        # convention, applied equally to power and psd. Do not "fix" to match
+        # scipy without updating the documented contract and all consumers.
         return self.power
 
     def _surface(self, kind: str) -> NDArray[np.float64]:
@@ -825,6 +838,7 @@ def compute_stacked_spectrograms(
     tol = (window_s - overlap_s) / 2.0
 
     Sxx = np.empty((T, F, C), dtype=np.float64)
+    unmatched: Dict[str, int] = {}
     for i, ch in enumerate(channels):
         spec = channel_specs[ch]
         if np.array_equal(spec.times, ref_times):
@@ -842,6 +856,24 @@ def compute_stacked_spectrograms(
                 best_dists = np.minimum(left_dists, right_dists)
                 mask = best_dists <= tol
                 Sxx[mask, :, i] = spec.Sxx[best[mask]]
+                n_unmatched = int(T - np.count_nonzero(mask))
+            else:
+                n_unmatched = T
+            if n_unmatched:
+                unmatched[ch] = n_unmatched
+
+    if unmatched:
+        detail = ", ".join(
+            f"{ch}: {count}/{T} time bins" for ch, count in unmatched.items()
+        )
+        warnings.warn(
+            "compute_stacked_spectrograms produced NaN-filled time bins for "
+            f"channels that could not be aligned to the reference grid within "
+            f"tol={tol:g}s ({detail}). These appear as NaN in Sxx; downstream "
+            "reductions must handle them (e.g. np.nanmean) or filter them out.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     return StackedSpectrogramResult(
         frequencies=frequencies,
