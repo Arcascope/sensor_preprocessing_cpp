@@ -259,17 +259,15 @@ def test_nustft_rejects_inputs_shorter_than_one_window():
         sp.compute_nustft(t, signal, window_s=10.0, overlap_s=5.0, target_fs=16.0)
 
 
-def test_compatibility_aliases_warn():
+def test_removed_nufft_alias_and_uniform_compatibility_alias_warns():
     t, signal = _jittered_tone()
 
-    with pytest.warns(FutureWarning):
-        old_nufft = sp.compute_spectrogram_nufft(
-            t, signal, secperseg=8.0, secoverlap=4.0, target_fs=16.0
-        )
-    new_nufft = sp.compute_nufft_spectrogram(
+    assert not hasattr(sp, "compute_spectrogram_nufft")
+
+    nufft = sp.compute_nufft_spectrogram(
         t, signal, window_s=8.0, overlap_s=4.0, target_fs=16.0, kind="magnitude"
     )
-    np.testing.assert_allclose(old_nufft.Sxx, new_nufft.Sxx)
+    assert nufft.Sxx.shape == (len(nufft.times), len(nufft.frequencies))
 
     with pytest.warns(FutureWarning):
         old_uniform = sp.compute_spectrogram(signal, fs=50.0, nperseg=128, noverlap=64)
@@ -278,4 +276,4 @@ def test_compatibility_aliases_warn():
 
 
 def test_version_is_consolidated():
-    assert senpy.__version__ == sp.__version__ == "1.0.0"
+    assert senpy.__version__ == sp.__version__ == "2.0.0"
