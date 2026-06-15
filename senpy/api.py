@@ -4,7 +4,7 @@ This module is an interface. The Python bindings already exist, but one must rea
 """
 
 import warnings
-from typing import Tuple, Union, Optional
+from typing import Dict, List, Tuple, Union, Optional
 import numpy as np
 from numpy.typing import NDArray
 
@@ -14,6 +14,14 @@ from ._version import __version__
 
 
 AXIS_ORDER_TIME_FREQUENCY = "time_frequency"
+
+
+def _normalize_spectral_kind(kind: str) -> str:
+    normalized = str(kind).replace("-", "_").lower()
+    aliases = {"mag": "magnitude", "magnitude": "magnitude", "power": "power", "psd": "psd"}
+    if normalized not in aliases:
+        raise ValueError("kind must be one of: 'mag', 'magnitude', 'power', 'psd'")
+    return aliases[normalized]
 
 
 # Add a simple test function to verify imports work
@@ -246,16 +254,28 @@ class NUSTFTResult:
 
     @property
     def psd(self) -> NDArray[np.float64]:
+        # Intentional: "psd" equals "power" and is NOT a missing normalization.
+        # The density scaling (1 / sqrt(fs * Σw²), the sample rate times Hann
+        # window energy) is already baked into the complex coefficients in the
+        # C++ layer, so power = |X|² / (fs * Σw²) already carries units²/Hz --
+        # exactly scipy's welch(scaling="density") formula. Do NOT additionally
+        # divide by df (the frequency step); that would double-count and is the
+        # wrong normalization anyway (a PSD needs ÷(fs·Σw²), not ÷df).
+        #
+        # Difference from scipy: scipy's one-sided density multiplies every bin
+        # except DC/Nyquist by 2 so integrating over [0, fs/2] recovers signal
+        # variance. We deliberately omit that ×2 folding factor -- this is our
+        # convention, applied equally to power and psd. Do not "fix" to match
+        # scipy without updating the documented contract and all consumers.
         return self.power
 
     def _surface(self, kind: str) -> NDArray[np.float64]:
+        kind = _normalize_spectral_kind(kind)
         if kind == "magnitude":
             return self.magnitude
         if kind == "power":
             return self.power
-        if kind == "psd":
-            return self.psd
-        raise ValueError("kind must be one of: 'magnitude', 'power', 'psd'")
+        return self.psd
 
     def spectrogram(self, kind: str = "psd") -> SpectrogramResult:
         """Return a derived real-valued spectral surface.
@@ -264,6 +284,7 @@ class NUSTFTResult:
         workflow. Compatibility wrappers such as ``compute_nufft_spectrogram``
         may choose ``"magnitude"`` to preserve older return-value expectations.
         """
+        kind = _normalize_spectral_kind(kind)
         return SpectrogramResult(
             frequencies=self.frequencies,
             times=self.times,
@@ -287,6 +308,51 @@ class NUSTFTResult:
         else:
             raise ValueError("average must be 'mean' or 'median'")
         return self.frequencies, spectrum
+
+
+STACKED_SPECTROGRAM_CHANNELS: List[str] = ["x", "y", "z", "mag", "jerk"]
+
+
+class StackedSpectrogramResult:
+    """Multi-channel stacked spectrogram with shape ``(n_times, n_freqs, n_channels)``.
+
+    Attributes:
+        frequencies: Frequency bins shared by all channels, in Hz.
+        times: Time bins shared by all channels, in seconds.
+        Sxx: Array shaped ``(n_times, n_freqs, n_channels)``.
+        channels: Ordered list of channel names, one per ``Sxx[:, :, i]``.
+        kind: Spectral quantity stored in ``Sxx``.
+    """
+
+    def __init__(
+        self,
+        frequencies: NDArray[np.float64],
+        times: NDArray[np.float64],
+        Sxx: NDArray[np.float64],
+        channels: List[str],
+        kind: str = "magnitude",
+    ):
+        self.frequencies = np.asarray(frequencies, dtype=np.float64)
+        self.times = np.asarray(times, dtype=np.float64)
+        self.Sxx = np.asarray(Sxx, dtype=np.float64)
+        self.channels = list(channels)
+        self.kind = kind
+        if self.Sxx.ndim != 3:
+            raise ValueError("Sxx must be a 3-D array shaped (n_times, n_freqs, n_channels)")
+        expected = (len(self.times), len(self.frequencies), len(self.channels))
+        if self.Sxx.shape != expected:
+            raise ValueError(
+                f"Sxx.shape={self.Sxx.shape} does not match "
+                f"(n_times={expected[0]}, n_freqs={expected[1]}, n_channels={expected[2]})"
+            )
+
+    @property
+    def n_channels(self) -> int:
+        return len(self.channels)
+
+    @property
+    def shape(self) -> Tuple[int, int, int]:
+        return self.Sxx.shape
 
 
 class ShortTimeFTResult:
@@ -551,6 +617,7 @@ def compute_nustft(
     overlap_s: float,
     ts_unit: str = "s",
     target_fs: Optional[float] = None,
+    detrend: bool = True,
 ) -> NUSTFTResult:
     """Compute complex non-uniform STFT coefficients using FINUFFT.
 
@@ -566,6 +633,8 @@ def compute_nustft(
         target_fs: Optional output frequency-grid limit. If specified, output
             bins span ``0`` through ``target_fs / 2`` with spacing
             ``1 / window_s``.
+        detrend: If true, subtract each window's mean before applying the Hann
+            taper. Set false to preserve DC/low-frequency offsets.
 
     Returns:
         ``NUSTFTResult`` with complex coefficients shaped ``(n_times, n_freqs)``.
@@ -588,6 +657,7 @@ def compute_nustft(
             float(window_s),
             float(overlap_s),
             float(target_fs_val),
+            bool(detrend),
         )
     except RuntimeError as e:
         raise RuntimeError(f"C++ NUSTFT computation failed: {e}") from e
@@ -610,20 +680,47 @@ def compute_nufft_spectrogram(
     ts_unit: str = "s",
     target_fs: Optional[float] = None,
     kind: str = "magnitude",
+    detrend: bool = True,
 ) -> SpectrogramResult:
     """Compute a FINUFFT-backed spectrogram from non-uniform samples.
 
-    This is a convenience wrapper over ``compute_nustft(...).spectrogram(kind)``.
     Use ``compute_nustft`` when phase or custom spectral reductions are needed.
     """
-    return compute_nustft(
-        timestamps=timestamps,
-        signal=signal,
-        window_s=window_s,
-        overlap_s=overlap_s,
-        ts_unit=ts_unit,
-        target_fs=target_fs,
-    ).spectrogram(kind=kind)
+    if len(timestamps) != len(signal):
+        raise ValueError("timestamps and signal must have the same length")
+    if len(timestamps) < 2:
+        raise ValueError("compute_nufft_spectrogram requires at least two timestamps")
+    _validate_time_window(window_s, overlap_s)
+    if target_fs is not None and target_fs < 0:
+        raise ValueError("target_fs must be >= 0")
+
+    t = _timestamps_to_seconds(timestamps, ts_unit)
+    target_fs_val = target_fs if target_fs is not None else 0.0
+    normalized_kind = _normalize_spectral_kind(kind)
+
+    try:
+        result = _senpy.compute_nufft_spectrogram(
+            t,
+            np.asarray(signal, dtype=np.float64),
+            float(window_s),
+            float(overlap_s),
+            float(target_fs_val),
+            normalized_kind,
+            bool(detrend),
+        )
+    except RuntimeError as e:
+        raise RuntimeError(f"C++ NUFFT spectrogram computation failed: {e}") from e
+
+    if len(result["times"]) == 0 and len(result["freqs"]) > 0:
+        raise ValueError("compute_nufft_spectrogram requires enough data for at least one window")
+
+    return SpectrogramResult(
+        frequencies=result["freqs"],
+        times=result["times"],
+        Sxx=result["Sxx"],
+        method="nufft",
+        kind=normalized_kind,
+    )
 
 
 def compute_nufft_welch(
@@ -635,6 +732,7 @@ def compute_nufft_welch(
     target_fs: Optional[float] = None,
     kind: str = "psd",
     average: str = "mean",
+    detrend: bool = True,
 ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Compute a Welch-style average spectrum using FINUFFT windows."""
     return compute_nustft(
@@ -644,36 +742,145 @@ def compute_nufft_welch(
         overlap_s=overlap_s,
         ts_unit=ts_unit,
         target_fs=target_fs,
+        detrend=detrend,
     ).welch(kind=kind, average=average)
 
 
-def compute_spectrogram_nufft(
-    timestamps: NDArray[np.float64],
-    signal: NDArray[np.float64],
-    secperseg: float,
-    secoverlap: float,
-    ts_unit: str = "s",
+def compute_stacked_spectrograms(
+    accel: "AccelerometerData",
+    window_s: float,
+    overlap_s: float,
     target_fs: Optional[float] = None,
-) -> SpectrogramResult:
-    """Compatibility alias for ``compute_nufft_spectrogram``.
+    kind: str = "magnitude",
+    detrend: bool = True,
+    channels: Optional[List[str]] = None,
+    use_diff: bool = True,
+) -> StackedSpectrogramResult:
+    """Compute per-axis NUFFT spectrograms and stack along the channel axis.
 
-    Deprecated in senpy 1.0. Use ``compute_nustft`` for complex coefficients
-    or ``compute_nufft_spectrogram`` for an explicit derived surface.
+    Computes individual spectrograms for each requested channel from a single
+    ``AccelerometerData`` object, aligns them to a shared time grid, and
+    stacks the results into a ``(T, F, C)`` tensor.
+
+    Available channels (``"x"``, ``"y"``, ``"z"``, ``"mag"``, ``"jerk"``):
+        ``"x"``    – X-axis acceleration spectrogram
+        ``"y"``    – Y-axis acceleration spectrogram
+        ``"z"``    – Z-axis acceleration spectrogram
+        ``"mag"``  – Euclidean magnitude spectrogram, ``||x, y, z||``
+        ``"jerk"`` – Scalar jerk (time-derivative of ||acceleration||) spectrogram
+
+    Args:
+        accel: Container holding aligned timestamps and x/y/z components.
+        window_s: NUFFT window duration in seconds.
+        overlap_s: Window overlap in seconds; must satisfy ``0 <= overlap_s < window_s``.
+        target_fs: If provided, output frequency bins are capped at ``target_fs / 2`` Hz.
+        kind: Spectral quantity — ``"magnitude"``, ``"power"``, or ``"psd"``.
+        detrend: Subtract each window's mean before the Hann taper.
+        channels: Ordered list of channels to include. Defaults to
+            ``["x", "y", "z", "mag", "jerk"]``.
+        use_diff: Finite-difference jerk (``True``) or C++ gradient estimator (``False``).
+
+    Returns:
+        ``StackedSpectrogramResult`` with ``Sxx`` shaped ``(T, F, len(channels))``.
     """
-    warnings.warn(
-        "compute_spectrogram_nufft is deprecated; use compute_nustft or "
-        "compute_nufft_spectrogram instead",
-        FutureWarning,
-        stacklevel=2,
-    )
-    return compute_nufft_spectrogram(
-        timestamps=timestamps,
-        signal=signal,
-        window_s=secperseg,
-        overlap_s=secoverlap,
-        ts_unit=ts_unit,
-        target_fs=target_fs,
-        kind="magnitude",
+    if channels is None:
+        channels = list(STACKED_SPECTROGRAM_CHANNELS)
+
+    _validate_time_window(window_s, overlap_s)
+    t_s = accel.timestamps_s
+
+    def _spec(
+        signal: NDArray[np.float64],
+        timestamps: NDArray[np.float64] = t_s,
+    ) -> SpectrogramResult:
+        return compute_nufft_spectrogram(
+            timestamps=timestamps,
+            signal=np.ascontiguousarray(signal, dtype=np.float64),
+            window_s=window_s,
+            overlap_s=overlap_s,
+            target_fs=target_fs,
+            kind=kind,
+            detrend=detrend,
+        )
+
+    channel_specs: Dict[str, SpectrogramResult] = {}
+    for ch in channels:
+        if ch == "x":
+            channel_specs["x"] = _spec(accel.x)
+        elif ch == "y":
+            channel_specs["y"] = _spec(accel.y)
+        elif ch == "z":
+            channel_specs["z"] = _spec(accel.z)
+        elif ch == "mag":
+            channel_specs["mag"] = _spec(compute_magnitude(accel.x, accel.y, accel.z))
+        elif ch == "jerk":
+            jerk_data = compute_jerk(
+                accel.timestamps_s,
+                accel.x,
+                accel.y,
+                accel.z,
+                ts_unit="s",
+                use_diff=use_diff,
+            )
+            channel_specs["jerk"] = _spec(jerk_data.jerk, timestamps=jerk_data.timestamps_s)
+        else:
+            raise ValueError(
+                f"Unknown channel {ch!r}. Must be one of: {STACKED_SPECTROGRAM_CHANNELS}"
+            )
+
+    ref_ch = next((c for c in channels if c != "jerk"), channels[0])
+    ref_spec = channel_specs[ref_ch]
+    ref_times = ref_spec.times
+    frequencies = ref_spec.frequencies
+    T = len(ref_times)
+    F = len(frequencies)
+    C = len(channels)
+    tol = (window_s - overlap_s) / 2.0
+
+    Sxx = np.empty((T, F, C), dtype=np.float64)
+    unmatched: Dict[str, int] = {}
+    for i, ch in enumerate(channels):
+        spec = channel_specs[ch]
+        if np.array_equal(spec.times, ref_times):
+            Sxx[:, :, i] = spec.Sxx
+        else:
+            Sxx[:, :, i] = np.nan
+            n = len(spec.times)
+            if n > 0:
+                idx = np.searchsorted(spec.times, ref_times)
+                left = np.clip(idx - 1, 0, n - 1)
+                right = np.clip(idx, 0, n - 1)
+                left_dists = np.abs(spec.times[left] - ref_times)
+                right_dists = np.abs(spec.times[right] - ref_times)
+                best = np.where(left_dists <= right_dists, left, right)
+                best_dists = np.minimum(left_dists, right_dists)
+                mask = best_dists <= tol
+                Sxx[mask, :, i] = spec.Sxx[best[mask]]
+                n_unmatched = int(T - np.count_nonzero(mask))
+            else:
+                n_unmatched = T
+            if n_unmatched:
+                unmatched[ch] = n_unmatched
+
+    if unmatched:
+        detail = ", ".join(
+            f"{ch}: {count}/{T} time bins" for ch, count in unmatched.items()
+        )
+        warnings.warn(
+            "compute_stacked_spectrograms produced NaN-filled time bins for "
+            f"channels that could not be aligned to the reference grid within "
+            f"tol={tol:g}s ({detail}). These appear as NaN in Sxx; downstream "
+            "reductions must handle them (e.g. np.nanmean) or filter them out.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return StackedSpectrogramResult(
+        frequencies=frequencies,
+        times=ref_times,
+        Sxx=Sxx,
+        channels=channels,
+        kind=_normalize_spectral_kind(kind),
     )
 
 
@@ -1157,6 +1364,8 @@ __all__ = [
     "AccelerometerData",
     "NUSTFTResult",
     "SpectrogramResult",
+    "StackedSpectrogramResult",
+    "STACKED_SPECTROGRAM_CHANNELS",
     "JerkData",
     "ShortTimeFTResult",
     "MotionFeatures",
@@ -1166,7 +1375,7 @@ __all__ = [
     "compute_nustft",
     "compute_nufft_spectrogram",
     "compute_nufft_welch",
-    "compute_spectrogram_nufft",
+    "compute_stacked_spectrograms",
     "compute_jerk",
     "compute_magnitude",
     "compute_uniform_spectrogram",
