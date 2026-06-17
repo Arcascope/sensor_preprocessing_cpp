@@ -1,0 +1,100 @@
+name: Build release wheel
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag/release to attach the wheel to, for example v2.0.0"
+        required: true
+        type: string
+      python-version:
+        description: "CPython version to build"
+        required: true
+        default: "3.11"
+        type: choice
+        options:
+          - "3.11"
+          - "3.12"
+
+permissions:
+  contents: write
+
+jobs:
+  build-wheel:
+    name: Build and attach wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      CMAKE_INSTALL_PARALLEL_LEVEL: "2"
+      MAKEFLAGS: "-j2"
+      NINJAFLAGS: "-j2"
+      MAX_JOBS: "2"
+
+    steps:
+      - name: Resolve release tag
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PYTHON_VERSION: ${{ inputs.python-version }}
+        run: |
+          if [ "$EVENT_NAME" = "release" ]; then
+            tag="$RELEASE_TAG"
+            python_version="3.12"
+          else
+            tag="$INPUT_TAG"
+            python_version="$INPUT_PYTHON_VERSION"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "python-version=$python_version" >> "$GITHUB_OUTPUT"
+
+      - name: Check out release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.release.outputs.python-version }}
+          cache: pip
+
+      - name: Add swap for native build
+        run: |
+          sudo swapoff /swapfile || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build wheel
+
+      - name: Build wheel
+        run: python -m build --wheel --outdir ../dist
+        working-directory: senpy
+
+      - name: List wheel
+        run: ls -lh dist
+
+      - name: Verify release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: gh release view "$TAG"
+
+      - name: Upload wheel to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: gh release upload "$TAG" dist/*.whl --clobber
