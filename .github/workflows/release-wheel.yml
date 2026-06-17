@@ -89,8 +89,9 @@ jobs:
 
       - name: Smoke test wheel
         run: |
-          pip install dist/*.whl
-          python -c "import senpy; print('senpy imported successfully')"
+          python -m pip install dist/*.whl
+          cd "$(mktemp -d)"
+          python -c "import pathlib, senpy; assert pathlib.Path(senpy.__file__).resolve().is_relative_to(pathlib.Path('${{ github.workspace }}').resolve()) is False; print('senpy imported successfully')"
 
       - name: Verify release exists
         env:
