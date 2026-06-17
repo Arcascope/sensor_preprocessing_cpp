@@ -12,7 +12,7 @@ on:
       python-version:
         description: "CPython version to build"
         required: true
-        default: "3.11"
+        default: "3.12"
         type: choice
         options:
           - "3.11"
