@@ -87,6 +87,11 @@ jobs:
       - name: List wheel
         run: ls -lh dist
 
+      - name: Smoke test wheel
+        run: |
+          pip install dist/*.whl
+          python -c "import senpy; print('senpy imported successfully')"
+
       - name: Verify release exists
         env:
           GH_TOKEN: ${{ github.token }}
