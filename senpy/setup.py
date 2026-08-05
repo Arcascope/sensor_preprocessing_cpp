@@ -131,6 +131,11 @@ setup(
     include_package_data=True,
     py_modules=['senpy', 'senpy.api', 'senpy._version', "senpy._core"],
     install_requires=['pybind11>=2.6.0', 'numpy>=1.19.0'],
+    extras_require={
+        # Install the CUDA-enabled JAX distribution separately when GPU support
+        # is required; this extra intentionally does not choose a CUDA version.
+        'jax': ['jax-finufft>=1.3.0'],
+    },
     setup_requires=['pybind11>=2.6.0'],
     cmdclass={'build_ext': SenpyBuildExt},
     zip_safe=False,
