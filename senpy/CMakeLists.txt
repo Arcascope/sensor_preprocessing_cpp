@@ -4,8 +4,12 @@ project(senpy)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Add optimization flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
+# Add optimization flags; CI runners use x86-64-v3 (AVX2) for portability.
+if(DEFINED ENV{CI} AND "$ENV{CI}" STREQUAL "true")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=x86-64-v3")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
+endif()
 
 # add ../cpp relative to this CMakeLists.txt
 set(CPP_DIR "${CMAKE_CURRENT_LIST_DIR}/../src")

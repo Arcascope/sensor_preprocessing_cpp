@@ -12,10 +12,16 @@ endif()
 
 # Compiler-specific optimizations
 # Note: -ffast-math is intentionally omitted — it breaks FINUFFT (IEEE-754 violations)
+# CI runners use x86-64-v3 (AVX2) for portability; local builds use native.
+if(DEFINED ENV{CI} AND "$ENV{CI}" STREQUAL "true")
+    set(MARCH_FLAG "-march=x86-64-v3")
+else()
+    set(MARCH_FLAG "-march=native -mtune=native")
+endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 ${MARCH_FLAG}")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 ${MARCH_FLAG}")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /arch:AVX2")
 endif()

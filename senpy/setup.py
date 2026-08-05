@@ -107,7 +107,7 @@ ext_modules = [
         sources=sources,
         include_dirs=include_dirs,
         language='c++',
-        extra_compile_args=['-std=c++17', '-O3', '-march=native', '-DPYTHON'],
+        extra_compile_args=['-std=c++17', '-O3', '-march=x86-64-v3' if os.environ.get('CI') == 'true' else '-march=native', '-DPYTHON'],
         extra_link_args=[
             f'-L{finufft_lib_dir}',
             '-lfinufft',
