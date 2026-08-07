@@ -52,3 +52,30 @@ The GPU default is `eps=1e-6`; enable JAX x64 before importing JAX if the
 application requires float64 precision. For absolute microsecond timestamps,
 either enable x64 before creating the JAX arrays or pass timestamps relative to
 the first sample.
+
+For high-throughput three-axis work across recordings, pre-pack ragged windows
+into a small set of static shapes, then run each batch on the JAX device:
+
+```python
+from senpy import jax as senpy_jax
+
+# Each sample array is shaped [N, 3] for x/y/z. The packer only discovers and
+# pads windows; it does not import JAX or execute a transform.
+batches = senpy_jax.pack_nustft_window_batches(
+    recordings, window_s=8.0, overlap_s=4.0, batch_size=128, ts_unit="s"
+)
+for batch in batches:
+    coefficients = senpy_jax.compute_nustft_window_batch(
+        batch.points,
+        batch.signals,
+        batch.valid,
+        nfft_padded=batch.nfft_padded,
+        median_fs=batch.median_fs,
+    )
+    real_coefficients = coefficients[batch.row_valid]  # [windows, 3, freqs]
+```
+
+`recording_indices`, `window_indices`, and `times` in each batch map valid
+output rows back to the input order. Batch sizes remain a hardware-specific
+throughput setting: measure with `block_until_ready()` and a CUDA profiler
+before claiming GPU saturation.
