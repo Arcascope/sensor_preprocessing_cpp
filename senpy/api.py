@@ -672,6 +672,211 @@ def compute_nustft(
     )
 
 
+class StreamingWindow:
+    """One finished window from :class:`StreamingNUSTFT`.
+
+    Attributes:
+        index: Window index relative to the transform's origin.
+        start: Window start in seconds, on the same clock as the pushed timestamps.
+        center: Window center in seconds — the value ``compute_nustft`` reports in ``times``,
+            before it subtracts the recording's first timestamp.
+        sample_count: Samples that landed in the window.
+        coefficients: Complex coefficients, one per entry of the transform's ``frequencies``.
+    """
+
+    __slots__ = ("index", "start", "center", "sample_count", "coefficients")
+
+    def __init__(
+        self,
+        index: int,
+        start: float,
+        center: float,
+        sample_count: int,
+        coefficients: NDArray[np.complex128],
+    ):
+        self.index = int(index)
+        self.start = float(start)
+        self.center = float(center)
+        self.sample_count = int(sample_count)
+        self.coefficients = np.asarray(coefficients, dtype=np.complex128)
+
+    def magnitude(self) -> NDArray[np.float64]:
+        return np.abs(self.coefficients)
+
+    def power(self) -> NDArray[np.float64]:
+        return np.abs(self.coefficients) ** 2
+
+    def __repr__(self) -> str:
+        return (
+            f"StreamingWindow(index={self.index}, start={self.start:g}, "
+            f"samples={self.sample_count}, freqs={self.coefficients.size})"
+        )
+
+
+class StreamingNUSTFT:
+    """Incremental NUSTFT — the transform of ``compute_nustft``, one chunk at a time.
+
+    ``compute_nustft`` needs the whole recording. This computes the identical coefficients from
+    a stream, emitting each window as soon as the data passes its end, and keeping only
+    per-subwindow spectra rather than the samples themselves. It is exact, not an approximation:
+    the transform is linear and the subwindows partition the window, so a window recombined from
+    its parts equals the transform of the whole. See ``README.md`` for the derivation, including
+    how the window's Hann taper and mean removal are deferred and reconstructed.
+
+    Args:
+        window_s: Window duration, as in ``compute_nustft``'s ``window_s``.
+        overlap_s: Window overlap; the hop is ``window_s - overlap_s``.
+        subwindow_s: Streaming granularity — the unit of work pushed in, typically one sensor
+            packet. ``window_s`` and the hop must both be whole multiples of it, so that no
+            subwindow straddles a window edge.
+        sample_rate_hz: Nominal stream rate. Used for the magnitude scale factor and to size the
+            frequency grid; ``compute_nustft`` derives the same number as the median sample
+            spacing over the whole recording, which a stream cannot see.
+        fmax: Report only bins up to this frequency. This is what makes the per-sample cost
+            small when a narrow band is wanted. ``None`` reports the full grid.
+        origin_s: Anchors the window grid — window ``w`` spans
+            ``[origin_s + w*hop, origin_s + w*hop + window_s)``. Pass the first timestamp to
+            reproduce ``compute_nustft``'s alignment, or a fixed epoch to keep window indices
+            meaningful across sessions.
+        detrend: Subtract each window's mean before the taper.
+        ts_unit: Unit of pushed timestamps — ``"s"``, ``"ms"``, or ``"us"``. ``origin_s``,
+            ``window_s`` and the returned times are always in seconds. Note that absolute unix
+            seconds in float64 resolve to about half a microsecond; pass times relative to a
+            recent origin when sub-microsecond timing matters.
+
+    Example:
+        >>> transform = StreamingNUSTFT(30.0, 0.0, 1.0, sample_rate_hz=100.0, fmax=5.0)
+        >>> for packet_t, packet_x in packets:              # doctest: +SKIP
+        ...     for window in transform.push(packet_t, packet_x):
+        ...         consume(window.magnitude())
+        >>> tail = transform.flush()                        # doctest: +SKIP
+    """
+
+    def __init__(
+        self,
+        window_s: float,
+        overlap_s: float,
+        subwindow_s: float,
+        sample_rate_hz: float,
+        fmax: Optional[float] = None,
+        origin_s: float = 0.0,
+        detrend: bool = True,
+        ts_unit: str = "s",
+    ):
+        _validate_time_window(window_s, overlap_s)
+        if subwindow_s <= 0 or subwindow_s > window_s:
+            raise ValueError("subwindow_s must satisfy 0 < subwindow_s <= window_s")
+        if sample_rate_hz <= 0:
+            raise ValueError("sample_rate_hz must be > 0")
+        if fmax is not None and fmax < 0:
+            raise ValueError("fmax must be >= 0")
+        self._ts_unit = ts_unit
+        self._impl = _senpy.StreamingNUSTFT(
+            secperseg=float(window_s),
+            secoverlap=float(overlap_s),
+            secpersub=float(subwindow_s),
+            sample_rate=float(sample_rate_hz),
+            fmax=float(fmax) if fmax is not None else 0.0,
+            origin=float(origin_s),
+            detrend=bool(detrend),
+        )
+        self.frequencies = self._impl.frequencies()
+
+    def push(
+        self,
+        timestamps: NDArray[np.float64],
+        signal: NDArray[np.float64],
+    ) -> List[StreamingWindow]:
+        """Appends samples and returns every window that closed as a result.
+
+        Timestamps must be non-decreasing across the life of the object; a sample belonging to a
+        subwindow the stream has already passed cannot be folded in and is counted by
+        :attr:`dropped_samples` instead.
+        """
+        t = _timestamps_to_seconds(timestamps, self._ts_unit)
+        values = np.asarray(signal, dtype=np.float64)
+        if t.shape != values.shape:
+            raise ValueError("timestamps and signal must have the same length")
+        return [
+            StreamingWindow(**entry)
+            for entry in self._impl.push(np.ascontiguousarray(t), np.ascontiguousarray(values))
+        ]
+
+    def flush(self) -> List[StreamingWindow]:
+        """Returns every window still open, however partial, and resets the transform.
+
+        Unlike :meth:`push`, this reports the trailing window ``compute_nustft`` stops short of.
+        """
+        return [StreamingWindow(**entry) for entry in self._impl.flush()]
+
+    @property
+    def dropped_samples(self) -> int:
+        """Samples that could not be placed: non-finite, or arriving out of order."""
+        return self._impl.dropped_samples
+
+    @property
+    def skipped_windows(self) -> int:
+        """Windows too sparse to transform (under four samples), as ``compute_nustft`` skips."""
+        return self._impl.skipped_windows
+
+    @property
+    def open_windows(self) -> int:
+        return self._impl.open_windows
+
+
+def compute_nustft_streaming(
+    timestamps: NDArray[np.float64],
+    signal: NDArray[np.float64],
+    window_s: float,
+    overlap_s: float,
+    subwindow_s: float,
+    sample_rate_hz: Optional[float] = None,
+    ts_unit: str = "s",
+    fmax: Optional[float] = None,
+    detrend: bool = True,
+    chunk: int = 1024,
+) -> NUSTFTResult:
+    """Runs a whole array through :class:`StreamingNUSTFT` and returns an ``NUSTFTResult``.
+
+    Mostly a convenience for testing the streaming path against ``compute_nustft``: with
+    ``sample_rate_hz`` left to default it reproduces that function's coefficients to roughly
+    1e-13 relative. Production callers stream with :class:`StreamingNUSTFT` directly.
+    """
+    t = _timestamps_to_seconds(timestamps, ts_unit)
+    values = np.asarray(signal, dtype=np.float64)
+    if len(t) < 2:
+        raise ValueError("compute_nustft_streaming requires at least two timestamps")
+    if sample_rate_hz is None:
+        sample_rate_hz = 1.0 / float(np.median(np.diff(t)))
+
+    transform = StreamingNUSTFT(
+        window_s=window_s,
+        overlap_s=overlap_s,
+        subwindow_s=subwindow_s,
+        sample_rate_hz=sample_rate_hz,
+        fmax=fmax,
+        origin_s=float(t[0]),
+        detrend=detrend,
+    )
+    windows: List[StreamingWindow] = []
+    for start in range(0, len(t), chunk):
+        windows.extend(transform.push(t[start : start + chunk], values[start : start + chunk]))
+    # push() only reports windows the stream has passed the end of. compute_nustft, which sees
+    # where the recording stops, also emits a final window that ends within one sample period
+    # of the last timestamp; take that one out of the flush and drop anything shorter.
+    limit = float(t[-1]) + 1.0 / sample_rate_hz
+    windows.extend(w for w in transform.flush() if w.start + window_s <= limit)
+
+    if not windows:
+        raise ValueError("compute_nustft_streaming requires enough data for at least one window")
+    return NUSTFTResult(
+        frequencies=transform.frequencies,
+        # compute_nustft reports window centers relative to the first timestamp.
+        times=np.array([w.center - t[0] for w in windows], dtype=np.float64),
+        coefficients=np.stack([w.coefficients for w in windows]),
+    )
+
+
 def compute_nufft_spectrogram(
     timestamps: NDArray[np.float64],
     signal: NDArray[np.float64],
@@ -1373,6 +1578,9 @@ __all__ = [
     "resample_accelerometer_cubic",
     "resample_accelerometer_cubic_microseconds",
     "compute_nustft",
+    "compute_nustft_streaming",
+    "StreamingNUSTFT",
+    "StreamingWindow",
     "compute_nufft_spectrogram",
     "compute_nufft_welch",
     "compute_stacked_spectrograms",

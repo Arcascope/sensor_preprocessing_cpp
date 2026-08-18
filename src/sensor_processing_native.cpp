@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <numeric>
 #include <string>
+#include <map>
+#include <limits>
+#include <stdexcept>
 
 #include <finufft.h>
 
@@ -1480,6 +1483,434 @@ public:
     }
 };
 
+// Coherent streaming NUSTFT: the transform of computeNUSTFT, computed incrementally.
+//
+// computeNUSTFT needs the whole recording at once. A recorder that must report a window as
+// soon as it closes -- or that cannot keep the raw samples at all -- needs the same transform
+// built a piece at a time, and the pieces must combine *exactly*, not approximately.
+//
+// The identity that makes this work is that the transform is linear in the data and the
+// subwindows partition the window, so
+//
+//     X_w(f) = sum_m exp(2*pi*i*f*d_m) * S_m(f)
+//
+// where S_m is the transform of subwindow m about its own origin and d_m is that origin's
+// offset into the window. Nothing is lost: this is decimation-in-time for nonuniform samples.
+// Note the contrast with Bartlett/Welch, which averages |S_m|^2 and is pinned at the
+// subwindow's frequency resolution -- keeping the complex S_m and their offsets recovers the
+// full window's resolution, because it recovers the full window's transform.
+//
+// Two parts of computeNUSTFT are properties of the *window*, not of any subwindow, so they are
+// deferred and reconstructed at recombination time:
+//
+//   Hann taper. The taper spans the window, so a subwindow cannot know its own weights until
+//   it is placed. On this frequency grid (spacing 1/secperseg) the taper is exactly one bin
+//   wide -- hann(tau) = 0.5 - 0.25*exp(2*pi*i*tau) - 0.25*exp(-2*pi*i*tau) -- so applying it
+//   after the fact is the three-tap convolution 0.5*D(k) - 0.25*D(k-1) - 0.25*D(k+1). That is
+//   why one extra bin above the reported band is carried; bin -1 needs no storage, being the
+//   conjugate of bin +1 for real input.
+//
+//   Mean removal. The window mean is unknown until the window closes, so each subwindow also
+//   carries the transform of the constant 1. Detrending is then D(k) = X(k) - mean*ones(k).
+//   The same accumulator yields sum(hann^2) for the scale factor: expanding hann^2 gives
+//   0.375 - 0.5*cos(2*pi*tau) + 0.125*cos(4*pi*tau), whose sum is
+//   0.375*N - 0.5*Re(ones(1)) + 0.125*Re(ones(2)) -- no second pass over the samples.
+//
+// Cost is O(bins) per sample, once, no matter how many windows a sample belongs to. Nothing
+// but per-subwindow spectra is retained, so memory does not grow with window length.
+//
+// Differences from computeNUSTFT, both consequences of never seeing the whole recording:
+//   * The sampling rate in the scale factor 1/sqrt(fs*sum(w^2)) is supplied by the caller
+//     rather than taken as the median spacing over the recording.
+//   * The Nyquist bin (only present when fmax is left unset) is the true +N/2 coefficient.
+//     computeNUSTFT reports its conjugate there, an artefact of reading that bin out of the
+//     aliased FINUFFT mode. Magnitudes are identical.
+struct StreamingNUSTFTWindow
+{
+    std::int64_t index = 0;                                   // window index relative to origin
+    double start = 0.0;                                       // window start, seconds
+    double center = 0.0;                                      // window center, seconds
+    std::size_t sample_count = 0;                             // samples that landed in it
+    std::vector<std::complex<double>> coefficients;           // one per reported frequency
+};
+
+class StreamingNUSTFT
+{
+public:
+    // secperseg / secoverlap match computeNUSTFT. secpersub is the streaming granularity: the
+    // unit of work pushed in, typically one sensor packet. Both the window and the hop must be
+    // whole multiples of it, so that no subwindow ever straddles a window edge -- a subwindow
+    // that did could not be reused by the windows on either side.
+    //
+    // sample_rate is the nominal rate of the stream, used only for the magnitude scale factor
+    // and to size the padded frequency grid the way computeNUSTFT does.
+    //
+    // fmax > 0 reports only bins up to fmax Hz, which is what makes the per-sample cost small
+    // when only a narrow band is wanted. fmax = 0 reports the full grid computeNUSTFT would.
+    //
+    // origin anchors the window grid: window w spans [origin + w*hop, origin + w*hop + secperseg),
+    // and window 0 is the earliest -- nothing before the origin is reported. Pass the first
+    // sample's timestamp to reproduce computeNUSTFT's alignment, or an absolute epoch to keep
+    // window identity stable across sessions.
+    StreamingNUSTFT(
+        double secperseg,
+        double secoverlap,
+        double secpersub,
+        double sample_rate,
+        double fmax = 0.0,
+        double origin = 0.0,
+        bool detrend = true)
+        : win_dur_(secperseg),
+          hop_dur_(secperseg - secoverlap),
+          sub_dur_(secpersub),
+          sample_rate_(sample_rate),
+          origin_(origin),
+          detrend_(detrend)
+    {
+        if (!(secperseg > 0.0))
+            throw std::runtime_error("secperseg must be > 0");
+        if (secoverlap < 0.0 || secoverlap >= secperseg)
+            throw std::runtime_error("secoverlap must satisfy 0 <= secoverlap < secperseg");
+        if (!(secpersub > 0.0) || secpersub > secperseg)
+            throw std::runtime_error("secpersub must satisfy 0 < secpersub <= secperseg");
+        if (!(sample_rate > 0.0))
+            throw std::runtime_error("sample_rate must be > 0");
+        if (fmax < 0.0)
+            throw std::runtime_error("fmax must be >= 0");
+
+        subs_per_window_ = wholeMultiple(win_dur_, sub_dur_, "secperseg");
+        subs_per_hop_ = wholeMultiple(hop_dur_, sub_dur_, "the hop (secperseg - secoverlap)");
+
+        // Same grid computeNUSTFT reports: bin k is k/secperseg Hz, and the full grid runs to
+        // the Nyquist of the power-of-two-padded transform length.
+        int nfft = static_cast<int>(win_dur_ * sample_rate_);
+        if (nfft < 2)
+            throw std::runtime_error("secperseg is too short for the given sample_rate");
+        int nfft_padded = 1;
+        while (nfft_padded < nfft)
+            nfft_padded <<= 1;
+
+        int full_bins = nfft_padded / 2 + 1;
+        n_freqs_ = full_bins;
+        if (fmax > 0.0)
+        {
+            int capped = static_cast<int>(std::floor(fmax * win_dur_)) + 1;
+            n_freqs_ = std::max(1, std::min(full_bins, capped));
+        }
+        // One extra bin for the taper's upper tap; bins 1 and 2 are needed for sum(hann^2)
+        // even when a single bin was requested.
+        n_bins_ = std::max(n_freqs_ + 1, 3);
+
+        freqs_.resize(n_freqs_);
+        for (int k = 0; k < n_freqs_; ++k)
+            freqs_[k] = k / win_dur_;
+
+        sub_ones_.resize(n_bins_);
+        sub_signal_.resize(n_bins_);
+        detrended_.resize(n_bins_);
+    }
+
+    // Appends samples. Timestamps must be non-decreasing across the whole life of the object:
+    // a sample belonging to a subwindow the stream has already moved past cannot be folded in
+    // and is counted by droppedSamples() instead.
+    void push(const double *timestamps, const double *signal, std::size_t count)
+    {
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const double t = timestamps[i];
+            const double s = signal[i];
+            if (!std::isfinite(t) || !std::isfinite(s))
+            {
+                ++dropped_;
+                continue;
+            }
+            const std::int64_t index = subwindowIndex(t);
+            if (index <= last_closed_sub_)
+            {
+                ++dropped_;
+                continue;
+            }
+            OpenSubwindow &sub = open_subs_[index];
+            sub.timestamps.push_back(t);
+            sub.signal.push_back(s);
+            if (!has_data_ || t > newest_)
+            {
+                newest_ = t;
+                has_data_ = true;
+            }
+        }
+        closeSettledSubwindows();
+    }
+
+    void push(const std::vector<double> &timestamps, const std::vector<double> &signal)
+    {
+        if (timestamps.size() != signal.size())
+            throw std::runtime_error("timestamps and signal must have the same length");
+        push(timestamps.data(), signal.data(), timestamps.size());
+    }
+
+    // Emits every window the stream has passed the end of, oldest first, and forgets it.
+    // The readiness test matches computeNUSTFT's loop bound, which admits a final window whose
+    // end is within one sample period of the last timestamp.
+    std::vector<StreamingNUSTFTWindow> drain()
+    {
+        std::vector<StreamingNUSTFTWindow> ready;
+        if (!has_data_)
+            return ready;
+
+        // A window is ready only once the stream has reached its end: with non-decreasing
+        // input, no sample belonging to it can arrive after that. Reporting a window even one
+        // sample period early would strand the samples that a packet whose clock drifted
+        // backwards still owes it -- and computeNUSTFT, which sees the whole recording, would
+        // have counted them. The trailing window computeNUSTFT admits when it is within one
+        // sample period of complete comes out of flush() instead.
+        const double reach = newest_ - origin_ - win_dur_;
+        if (reach < 0.0)
+            return ready;
+        const std::int64_t newest_ready = static_cast<std::int64_t>(std::floor(reach / hop_dur_));
+        if (newest_ready <= last_drained_)
+            return ready;
+
+        // Every subwindow of a ready window ends no later than that window does, so
+        // closeSettledSubwindows -- which runs at the end of every push -- has already folded
+        // them all in. Nothing here can still be buffered.
+        for (auto it = open_windows_.begin(); it != open_windows_.end();)
+        {
+            if (it->first > newest_ready)
+                break;
+            appendIfComputable(it->first, it->second, ready);
+            it = open_windows_.erase(it);
+        }
+        last_drained_ = newest_ready;
+        return ready;
+    }
+
+    // Emits everything still open, however partial, and resets to empty. Unlike drain(), this
+    // reports the trailing window computeNUSTFT would have stopped short of.
+    std::vector<StreamingNUSTFTWindow> flush()
+    {
+        std::vector<StreamingNUSTFTWindow> ready;
+        for (auto &entry : open_subs_)
+            fold(entry.first, entry.second);
+        open_subs_.clear();
+        for (auto &entry : open_windows_)
+        {
+            appendIfComputable(entry.first, entry.second, ready);
+            last_drained_ = entry.first;
+        }
+        open_windows_.clear();
+        return ready;
+    }
+
+    const std::vector<double> &frequencies() const { return freqs_; }
+
+    // Samples that could not be placed: non-finite, or belonging to a subwindow or window the
+    // stream had already closed. A nonzero count means input arrived out of order.
+    std::size_t droppedSamples() const { return dropped_; }
+
+    std::size_t openWindows() const { return open_windows_.size(); }
+
+    // Windows that held fewer than the four samples computeNUSTFT requires, and so were
+    // skipped rather than reported. These are the gaps in the output's time axis.
+    std::size_t skippedWindows() const { return skipped_; }
+
+private:
+    struct OpenSubwindow
+    {
+        std::vector<double> timestamps;
+        std::vector<double> signal;
+    };
+
+    struct WindowAccumulator
+    {
+        std::vector<std::complex<double>> ones;
+        std::vector<std::complex<double>> signal;
+        std::size_t count = 0;
+        double sum = 0.0;
+    };
+
+    static int wholeMultiple(double duration, double unit, const char *name)
+    {
+        const double ratio = duration / unit;
+        const int rounded = static_cast<int>(std::llround(ratio));
+        if (rounded < 1 || std::fabs(ratio - rounded) > 1e-9 * std::max(1.0, ratio))
+            throw std::runtime_error(std::string(name) + " must be a whole multiple of secpersub");
+        return rounded;
+    }
+
+    std::int64_t subwindowIndex(double t) const
+    {
+        return static_cast<std::int64_t>(std::floor((t - origin_) / sub_dur_));
+    }
+
+    double subwindowStart(std::int64_t index) const { return origin_ + index * sub_dur_; }
+
+    double windowStart(std::int64_t index) const { return origin_ + index * hop_dur_; }
+
+    void closeSettledSubwindows()
+    {
+        for (auto it = open_subs_.begin(); it != open_subs_.end();)
+        {
+            if (subwindowStart(it->first) + sub_dur_ > newest_)
+            {
+                ++it;
+                continue;
+            }
+            fold(it->first, it->second);
+            last_closed_sub_ = std::max(last_closed_sub_, it->first);
+            it = open_subs_.erase(it);
+        }
+    }
+
+    // Transforms one subwindow onto the window grid and adds it, phase-ramped, to every window
+    // that contains it.
+    void fold(std::int64_t index, const OpenSubwindow &sub)
+    {
+        const std::size_t count = sub.timestamps.size();
+        if (count == 0)
+            return;
+
+        std::fill(sub_ones_.begin(), sub_ones_.end(), std::complex<double>(0.0, 0.0));
+        std::fill(sub_signal_.begin(), sub_signal_.end(), std::complex<double>(0.0, 0.0));
+        double sum = 0.0;
+        const double start = subwindowStart(index);
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            // Phase is measured in cycles of the *window*, not of the subwindow: the grid
+            // spacing is 1/secperseg, so that is the unit the recombination speaks in.
+            const double tau = (sub.timestamps[i] - start) / win_dur_;
+            const double angle = 2.0 * M_PI * tau;
+            const std::complex<double> step(std::cos(angle), std::sin(angle));
+            // Stepping bin to bin by multiplication costs one sine/cosine pair per sample
+            // instead of one per (sample, bin); over a few thousand bins the drift stays near
+            // machine epsilon, well inside the tolerance FINUFFT itself is called at.
+            std::complex<double> phase(1.0, 0.0);
+            const double value = sub.signal[i];
+            sum += value;
+            for (int k = 0; k < n_bins_; ++k)
+            {
+                sub_ones_[k] += phase;
+                sub_signal_[k] += value * phase;
+                phase *= step;
+            }
+        }
+
+        // Windows containing this subwindow: w*H <= index <= w*H + S - 1. Window 0 starts at
+        // the origin and nothing precedes it, so a subwindow that would also belong to an
+        // earlier, negative window contributes only to the windows from 0 up -- the same
+        // convention computeNUSTFT follows when it starts its first window at the first sample.
+        const std::int64_t highest = floorDiv(index, subs_per_hop_);
+        const std::int64_t lowest =
+            std::max<std::int64_t>(0, ceilDiv(index - subs_per_window_ + 1, subs_per_hop_));
+        for (std::int64_t w = lowest; w <= highest; ++w)
+        {
+            if (w <= last_drained_)
+            {
+                dropped_ += count;
+                continue;
+            }
+            WindowAccumulator &accumulator = open_windows_[w];
+            if (accumulator.ones.empty())
+            {
+                accumulator.ones.assign(n_bins_, std::complex<double>(0.0, 0.0));
+                accumulator.signal.assign(n_bins_, std::complex<double>(0.0, 0.0));
+            }
+            const int offset = static_cast<int>(index - w * subs_per_hop_);
+            const double unit = 2.0 * M_PI * offset / subs_per_window_;
+            const std::complex<double> ramp_step(std::cos(unit), std::sin(unit));
+            std::complex<double> ramp(1.0, 0.0);
+            for (int k = 0; k < n_bins_; ++k)
+            {
+                accumulator.ones[k] += sub_ones_[k] * ramp;
+                accumulator.signal[k] += sub_signal_[k] * ramp;
+                ramp *= ramp_step;
+            }
+            accumulator.count += count;
+            accumulator.sum += sum;
+        }
+    }
+
+    void appendIfComputable(
+        std::int64_t index,
+        const WindowAccumulator &accumulator,
+        std::vector<StreamingNUSTFTWindow> &out)
+    {
+        // computeNUSTFT skips windows this sparse rather than reporting a meaningless spectrum.
+        if (accumulator.count < 4)
+        {
+            ++skipped_;
+            return;
+        }
+
+        StreamingNUSTFTWindow window;
+        window.index = index;
+        window.start = windowStart(index);
+        window.center = window.start + win_dur_ / 2.0;
+        window.sample_count = accumulator.count;
+        window.coefficients.assign(n_freqs_, std::complex<double>(0.0, 0.0));
+
+        const double mean = detrend_ ? accumulator.sum / accumulator.count : 0.0;
+        for (int k = 0; k < n_bins_; ++k)
+            detrended_[k] = accumulator.signal[k] - mean * accumulator.ones[k];
+
+        const double window_sum_squares =
+            0.375 * accumulator.count - 0.5 * accumulator.ones[1].real() + 0.125 * accumulator.ones[2].real();
+        if (window_sum_squares <= 0.0)
+        {
+            out.push_back(std::move(window));
+            return;
+        }
+        const double scale = 1.0 / std::sqrt(sample_rate_ * window_sum_squares);
+
+        for (int k = 0; k < n_freqs_; ++k)
+        {
+            const std::complex<double> lower =
+                (k == 0) ? std::conj(detrended_[1]) : detrended_[k - 1];
+            window.coefficients[k] =
+                (0.5 * detrended_[k] - 0.25 * lower - 0.25 * detrended_[k + 1]) * scale;
+        }
+        out.push_back(std::move(window));
+    }
+
+    static std::int64_t floorDiv(std::int64_t a, std::int64_t b)
+    {
+        const std::int64_t q = a / b;
+        return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q;
+    }
+
+    static std::int64_t ceilDiv(std::int64_t a, std::int64_t b)
+    {
+        return -floorDiv(-a, b);
+    }
+
+    double win_dur_;
+    double hop_dur_;
+    double sub_dur_;
+    double sample_rate_;
+    double origin_;
+    bool detrend_;
+
+    int subs_per_window_ = 0;
+    int subs_per_hop_ = 0;
+    int n_freqs_ = 0;
+    int n_bins_ = 0;
+    std::vector<double> freqs_;
+
+    std::map<std::int64_t, OpenSubwindow> open_subs_;
+    std::map<std::int64_t, WindowAccumulator> open_windows_;
+
+    std::vector<std::complex<double>> sub_ones_;
+    std::vector<std::complex<double>> sub_signal_;
+    std::vector<std::complex<double>> detrended_;
+
+    double newest_ = 0.0;
+    bool has_data_ = false;
+    std::int64_t last_closed_sub_ = std::numeric_limits<std::int64_t>::min();
+    std::int64_t last_drained_ = std::numeric_limits<std::int64_t>::min();
+    std::size_t dropped_ = 0;
+    std::size_t skipped_ = 0;
+};
+
 // FFI exports for Dart
 extern "C"
 {
@@ -2221,6 +2652,67 @@ py::array_t<double> smoothSpectrogramPeaks_wrapper(
     return out_smoothed;
 }
 
+
+// --- streaming NUSTFT -----------------------------------------------------------------
+// Exposed as a class rather than a function: the whole point is state that outlives one call.
+py::list streamingWindowsToPython(const std::vector<StreamingNUSTFTWindow> &windows, std::size_t n_freqs)
+{
+    py::list out;
+    for (const auto &window : windows)
+    {
+        py::array_t<std::complex<double>> coefficients(static_cast<py::ssize_t>(n_freqs));
+        std::copy(window.coefficients.begin(), window.coefficients.end(),
+                  static_cast<std::complex<double> *>(coefficients.request().ptr));
+        py::dict entry;
+        entry["index"] = window.index;
+        entry["start"] = window.start;
+        entry["center"] = window.center;
+        entry["sample_count"] = window.sample_count;
+        entry["coefficients"] = coefficients;
+        out.append(entry);
+    }
+    return out;
+}
+
+class StreamingNUSTFTPy
+{
+public:
+    StreamingNUSTFTPy(double secperseg, double secoverlap, double secpersub, double sample_rate,
+                      double fmax, double origin, bool detrend)
+        : impl_(secperseg, secoverlap, secpersub, sample_rate, fmax, origin, detrend) {}
+
+    py::list push(py::array_t<double> timestamps, py::array_t<double> signal)
+    {
+        auto ts_buf = timestamps.request();
+        auto sig_buf = signal.request();
+        if (ts_buf.size != sig_buf.size)
+            throw std::runtime_error("timestamps and signal must have the same length");
+        impl_.push(static_cast<double *>(ts_buf.ptr), static_cast<double *>(sig_buf.ptr),
+                   static_cast<std::size_t>(ts_buf.size));
+        return streamingWindowsToPython(impl_.drain(), impl_.frequencies().size());
+    }
+
+    py::list flush()
+    {
+        return streamingWindowsToPython(impl_.flush(), impl_.frequencies().size());
+    }
+
+    py::array_t<double> frequencies() const
+    {
+        py::array_t<double> out(static_cast<py::ssize_t>(impl_.frequencies().size()));
+        std::copy(impl_.frequencies().begin(), impl_.frequencies().end(),
+                  static_cast<double *>(out.request().ptr));
+        return out;
+    }
+
+    std::size_t droppedSamples() const { return impl_.droppedSamples(); }
+    std::size_t skippedWindows() const { return impl_.skippedWindows(); }
+    std::size_t openWindows() const { return impl_.openWindows(); }
+
+private:
+    StreamingNUSTFT impl_;
+};
+
 PYBIND11_MODULE(_core, m)
 {
     m.doc() = "Sensor processing module with FFT-based signal analysis";
@@ -2281,6 +2773,28 @@ PYBIND11_MODULE(_core, m)
           py::arg("secoverlap"),
           py::arg("target_fs") = 0.0,
           py::arg("detrend") = true);
+
+    py::class_<StreamingNUSTFTPy>(m, "StreamingNUSTFT",
+          "Incremental NUSTFT: push samples, get finished windows back, exactly as if the whole "
+          "recording had been passed to compute_nustft at once")
+        .def(py::init<double, double, double, double, double, double, bool>(),
+             py::arg("secperseg"),
+             py::arg("secoverlap"),
+             py::arg("secpersub"),
+             py::arg("sample_rate"),
+             py::arg("fmax") = 0.0,
+             py::arg("origin") = 0.0,
+             py::arg("detrend") = true)
+        .def("push", &StreamingNUSTFTPy::push,
+             "Append samples and return every window that closed as a result",
+             py::arg("timestamps"),
+             py::arg("signal"))
+        .def("flush", &StreamingNUSTFTPy::flush,
+             "Return every window still open, however partial, and reset")
+        .def("frequencies", &StreamingNUSTFTPy::frequencies)
+        .def_property_readonly("dropped_samples", &StreamingNUSTFTPy::droppedSamples)
+        .def_property_readonly("skipped_windows", &StreamingNUSTFTPy::skippedWindows)
+        .def_property_readonly("open_windows", &StreamingNUSTFTPy::openWindows);
 
     m.def("compute_short_time_ft", &computeShortTimeFT_wrapper,
           "Compute Short-Time Fourier Transform returning complex values (n_times, n_frequencies, 2)",
