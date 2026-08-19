@@ -13,7 +13,7 @@ recordings.
 
 ## Current state
 
-`senpy.jax.compute_nustft` currently finds windows, then calls a JIT-compiled
+`senpy.jax_backend.compute_nustft` currently finds windows, then calls a JIT-compiled
 type-1 NUFFT once per window. It reuses compilation for equal source counts,
 but the Python loop still submits the transforms serially. The three
 accelerometer axes are also separate calls at the application level.

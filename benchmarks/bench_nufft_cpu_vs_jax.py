@@ -5,58 +5,27 @@ jax-finufft was rebuilt from source with JAX_FINUFFT_USE_CUDA=ON /
 CMAKE_CUDA_ARCHITECTURES=120 against CUDA 13.0 (the PyPI wheel is
 CPU-only). This script compares three paths:
 
-    * senpy.api.compute_nustft       -- C++ / FINUFFT, CPU
-    * senpy.jax.compute_nustft       -- JAX / jax-finufft, forced onto CPU
-    * senpy.jax.compute_nustft       -- JAX / jax-finufft, forced onto GPU (cuFINUFFT)
+    * senpy.api.compute_nustft         -- C++ / FINUFFT, CPU
+    * senpy.jax_backend.compute_nustft -- JAX / jax-finufft, forced onto CPU
+    * senpy.jax_backend.compute_nustft -- JAX / jax-finufft, forced onto GPU (cuFINUFFT)
 
 Pipeline per the task: load CSV -> NUFFT spectrogram with 30s windows /
 30s steps (no overlap) -> resample to 50 Hz at the end. Resampling has no
 JAX-native implementation in this repo, so it runs on CPU via senpy.api
 for all backends; only the NUFFT/spectrogram stage is actually compared.
-
-Run this from OUTSIDE the senpy source checkout (e.g. `python
-/path/to/bench_nufft_cpu_vs_jax.py ...`). senpy's repo root has a
-jax.py module that shadows the real `jax` package if the repo root
-ever ends up on sys.path (e.g. via `python -c` from inside it, or
-`PYTHONPATH`) -- this script guards against that but won't save you if
-you `cd` into the repo and run `python -i`.
 """
 
 from __future__ import annotations
 
 import argparse
 import statistics
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-
-def _guard_against_jax_shadowing() -> None:
-    """Fail loudly if `jax` would resolve to senpy's jax.py instead of real JAX."""
-    import importlib.util
-
-    spec = importlib.util.find_spec("jax")
-    if spec is None or spec.origin is None:
-        return
-    origin = Path(spec.origin)
-    if origin.name == "jax.py" and (origin.parent / "_core.cpython-312-x86_64-linux-gnu.so").exists() is False:
-        # Heuristic: senpy's repo-root jax.py sits beside api.py/_version.py,
-        # not inside a proper "jax" package directory like the real library.
-        if (origin.parent / "api.py").exists():
-            raise RuntimeError(
-                f"`jax` resolved to {origin}, which looks like senpy's own "
-                "jax.py, not the real JAX package. This happens when the "
-                "senpy repo root is on sys.path (cwd, PYTHONPATH, etc). "
-                "Run this script from a different working directory."
-            )
-
-
-_guard_against_jax_shadowing()
-
-import senpy.api as sp_cpu  # noqa: E402
+import senpy.api as sp_cpu
 
 
 def _enable_jax_x64() -> None:
@@ -152,7 +121,7 @@ def bench_jax(t_ms, signal, window_s, step_s, target_fs, kind, repeats, device_k
     _enable_jax_x64()
     import jax
     import jax.numpy as jnp
-    import senpy.jax as sp_jax
+    import senpy.jax_backend as sp_jax
 
     overlap_s = window_s - step_s
     # Force these arrays onto the requested device explicitly -- JAX's
@@ -160,8 +129,9 @@ def bench_jax(t_ms, signal, window_s, step_s, target_fs, kind, repeats, device_k
     # had no registered CUDA lowering and would error rather than fall
     # back to CPU, so explicit placement keeps CPU vs GPU unambiguous.
     device = jax.devices(device_kind)[0]
-    # Recenter on the host in float64 seconds before handing off to JAX --
-    # see _enable_jax_x64 docstring for why this matters.
+    # compute_nustft centers host arrays itself, but these are device arrays
+    # the caller builds, so recenter in float64 seconds first -- see the
+    # _enable_jax_x64 docstring for why this matters.
     t_rel_s = (t_ms - t_ms[0]) / 1e3
     t_device = jax.device_put(jnp.asarray(t_rel_s), device=device)
     s_device = jax.device_put(jnp.asarray(signal), device=device)
@@ -242,7 +212,7 @@ def main():
     jax_results = {}
     for device_kind in args.jax_devices:
         label = f"JAX/{device_kind}"
-        print(f"=== {label} (senpy.jax / jax-finufft) ===")
+        print(f"=== {label} (senpy.jax_backend / jax-finufft) ===")
         jx = bench_jax(
             t_ms, signal, args.window_s, args.step_s, args.target_fs, args.kind,
             args.repeats, device_kind,

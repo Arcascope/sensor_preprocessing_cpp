@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from senpy import jax as senpy_jax
-from senpy.jax import pack_nustft_window_batches
+from senpy import jax_backend as senpy_jax
+from senpy.jax_backend import pack_nustft_window_batches
 
 
 class _FakeJax:
@@ -25,6 +25,20 @@ class _FakeJax:
 def _fake_nufft1(nfft, strengths, points, *, eps, iflag):
     del points, eps, iflag
     return np.repeat(np.sum(strengths, axis=1, keepdims=True), nfft, axis=1)
+
+
+@pytest.fixture(autouse=True)
+def _clear_transform_cache():
+    """Keep NumPy-backed fakes out of the module-level transform cache.
+
+    ``_nustft_window_batch_transform`` is an unbounded ``lru_cache`` keyed only
+    on ``(nfft_padded, detrend, eps)``. A closure built while ``_dependencies``
+    is monkeypatched would otherwise outlive the patch and be handed to any
+    later test that happens to use the same key.
+    """
+    senpy_jax._nustft_window_batch_transform.cache_clear()
+    yield
+    senpy_jax._nustft_window_batch_transform.cache_clear()
 
 
 def test_packer_makes_static_three_axis_batches_and_marks_final_padding():
@@ -89,7 +103,6 @@ def test_packer_rejects_non_three_axis_or_unsorted_recordings():
 
 
 def test_window_batch_masks_padded_samples_and_rows_without_optional_jax(monkeypatch):
-    senpy_jax._nustft_window_batch_transform.cache_clear()
     monkeypatch.setattr(
         senpy_jax,
         "_dependencies",
@@ -111,3 +124,44 @@ def test_window_batch_masks_padded_samples_and_rows_without_optional_jax(monkeyp
     assert coefficients.shape == (2, 3, 3)
     assert np.all(np.isfinite(coefficients[0]))
     assert np.all(coefficients[1] == 0.0)
+
+
+def test_low_energy_window_keeps_its_true_hann_scale(monkeypatch):
+    """A sparse window near a taper edge must not be silently renormalized.
+
+    ``sum(hann^2)`` falls below 1.0 whenever the surviving samples sit close to
+    a window edge, where the taper goes to zero quadratically. The scale factor
+    is ``1/sqrt(fs * sum(hann^2))`` in both CPU backends, with no floor, so the
+    batched path must not clamp the divisor either.
+    """
+    monkeypatch.setattr(
+        senpy_jax,
+        "_dependencies",
+        lambda: (_FakeJax(), np, _fake_nufft1),
+    )
+    # Four samples in the first 0.4% of the window, plus an all-padding row.
+    tau = np.array([0.001, 0.002, 0.003, 0.004])
+    points = np.vstack((2.0 * np.pi * tau - np.pi, np.zeros(4)))
+    valid = np.array([[True] * 4, [False] * 4])
+    signals = np.ones((2, 3, 4))
+    median_fs = np.array([50.0, 1.0])
+
+    hann = 0.5 * (1.0 - np.cos(2.0 * np.pi * tau))
+    window_ss = float(np.sum(hann * hann))
+    assert window_ss < 1.0, "the clamp would be inert if the taper energy exceeded 1"
+
+    coefficients = senpy_jax.compute_nustft_window_batch(
+        points, signals, valid, nfft_padded=8, median_fs=median_fs, detrend=False
+    )
+
+    # _fake_nufft1 sums the strengths into every mode, so with unit samples and
+    # no detrending each coefficient is sum(hann) * phase_correction * scale.
+    phase_correction = np.where(np.arange(5) % 2 == 0, 1.0, -1.0)
+    expected = np.sum(hann) * phase_correction / np.sqrt(50.0 * window_ss)
+
+    assert coefficients.shape == (2, 3, 5)
+    for channel in range(3):
+        np.testing.assert_allclose(coefficients[0, channel], expected, rtol=1e-12)
+    # The padded row still resolves to exactly zero rather than inf/NaN.
+    assert np.all(coefficients[1] == 0.0)
+    assert np.all(np.isfinite(coefficients))

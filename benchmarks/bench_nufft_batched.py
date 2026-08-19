@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Benchmark senpy's *batched* JAX NUFFT path against the CPU/C++ backend.
 
-The previous benchmark (bench_nufft_cpu_vs_jax.py) drives senpy.jax's
+The previous benchmark (bench_nufft_cpu_vs_jax.py) drives senpy.jax_backend's
 per-window loop (one nufft1 call per 30s window, one distinct jax.jit
 compile per distinct window sample-count). That loop is latency-bound: it
 only became competitive with the C++ backend at ~3000+ windows from a
 single 30-hour recording, and lost badly at small window counts.
 
-senpy.jax also ships a *packing* API (pack_nustft_window_batches +
+senpy.jax_backend also ships a *packing* API (pack_nustft_window_batches +
 compute_nustft_window_batch) built specifically to fix this: it buckets
 windows -- across many files at once -- into static-shape [B, M] batches
 and runs each bucket as ONE vmapped nufft1 call instead of one call per
@@ -26,9 +26,6 @@ resample exists in this repo).
 Handles both accelerometer CSV schemas seen in this dataset collection:
     t,x,y,z                    (epoch milliseconds, e.g. SEN-A)
     TIMESTAMP,ACC_X,ACC_Y,ACC_Z (seconds relative to recording start, e.g. SURF)
-
-Run this from OUTSIDE the senpy source checkout -- see the shadowing
-guard below for why.
 """
 
 from __future__ import annotations
@@ -43,25 +40,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
-def _guard_against_jax_shadowing() -> None:
-    import importlib.util
-
-    spec = importlib.util.find_spec("jax")
-    if spec is None or spec.origin is None:
-        return
-    origin = Path(spec.origin)
-    if origin.name == "jax.py" and (origin.parent / "api.py").exists():
-        raise RuntimeError(
-            f"`jax` resolved to {origin}, which looks like senpy's own "
-            "jax.py, not the real JAX package. Run this script from a "
-            "different working directory."
-        )
-
-
-_guard_against_jax_shadowing()
-
-import senpy.api as sp_cpu  # noqa: E402
+import senpy.api as sp_cpu
 
 
 SCHEMAS = [
@@ -155,7 +134,7 @@ def bench_cpu_baseline(recordings, ts_unit, window_s, step_s, repeats):
 def bench_batched(recordings, ts_unit, window_s, step_s, batch_size, eps, device_kind, repeats, enable_x64):
     import jax
     import jax.numpy as jnp
-    import senpy.jax as sp_jax
+    import senpy.jax_backend as sp_jax
 
     if enable_x64:
         jax.config.update("jax_enable_x64", True)

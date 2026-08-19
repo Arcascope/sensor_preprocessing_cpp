@@ -7,7 +7,7 @@ jax = pytest.importorskip("jax")
 pytest.importorskip("jax_finufft")
 jnp = pytest.importorskip("jax.numpy")
 
-from senpy import jax as senpy_jax
+from senpy import jax_backend as senpy_jax
 
 
 def test_compute_nustft_returns_device_arrays_with_known_tone():

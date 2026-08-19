@@ -30,8 +30,8 @@ def _dependencies() -> Tuple[Any, Any, Any]:
         from jax_finufft import nufft1
     except ImportError as exc:
         raise ImportError(
-            "senpy.jax requires JAX and jax-finufft. Install a JAX build for "
-            "your device, then install 'senpy[jax]'."
+            "senpy.jax_backend requires JAX and jax-finufft. Install a JAX build "
+            "for your device, then install 'senpy[jax]'."
         ) from exc
     return jax, jnp, nufft1
 
@@ -162,6 +162,57 @@ def _timestamp_scale(ts_unit: str) -> float:
         raise ValueError("ts_unit must be one of: 's', 'ms', 'us'") from exc
 
 
+_TIMESTAMP_PRECISION_REMEDY = (
+    " Subtract the first sample before converting the timestamps to a JAX array, "
+    "or enable jax_enable_x64 before importing JAX."
+)
+
+
+def _timestamp_precision_hint(timestamp_gap_s: float) -> str:
+    """Explain a device-array precision failure, or say nothing if that is not it."""
+    if timestamp_gap_s <= 0.0:
+        return ""
+    return (
+        " The timestamps arrived as a JAX array whose dtype resolves values only "
+        f"to within {timestamp_gap_s:.3g} s at their own magnitude."
+        + _TIMESTAMP_PRECISION_REMEDY
+    )
+
+
+def _to_centered_seconds(jax: Any, jnp: Any, timestamps: Any, ts_unit: str) -> Tuple[Any, float]:
+    """Convert timestamps to seconds relative to the first sample.
+
+    The CPU API reports times relative to the first sample, and centering is
+    also what keeps large absolute timestamps representable: without
+    ``jax_enable_x64`` JAX materializes float64 host input as float32, whose
+    ~1e-7 relative precision cannot resolve millisecond spacing at an epoch
+    magnitude of ~1.7e12. Host arrays are therefore centered in float64 by
+    NumPy *before* they reach the device.
+
+    Arrays that arrive already on the device cannot be repaired here -- the
+    caller chose their dtype and any precision is already lost -- so the second
+    return value reports the representation gap of the input at its own
+    magnitude, in seconds. The caller compares that against the observed sample
+    spacing to reject timestamps that were unresolvable on arrival. Host input
+    is centered losslessly and reports a gap of 0.0.
+    """
+    scale = _timestamp_scale(ts_unit)
+    if isinstance(timestamps, jax.Array):
+        if timestamps.size == 0:
+            return timestamps, 0.0
+        centered = (timestamps - timestamps[0]) * scale
+        if not jnp.issubdtype(timestamps.dtype, jnp.floating):
+            # Integer timestamps represent every value in range exactly.
+            return centered, 0.0
+        magnitude = float(jax.device_get(jnp.max(jnp.abs(timestamps))))
+        gap = magnitude * float(jnp.finfo(timestamps.dtype).eps) * scale
+        return centered, gap
+    host = np.asarray(timestamps, dtype=np.float64)
+    if host.ndim == 1 and host.size:
+        host = host - host[0]
+    return jnp.asarray(host * scale), 0.0
+
+
 def _validate_nfft_padded(nfft_padded: int) -> int:
     nfft_padded = int(nfft_padded)
     if nfft_padded < 2 or nfft_padded & (nfft_padded - 1):
@@ -210,9 +261,16 @@ def _nustft_window_batch_transform(
 
         window_ss = jnp.sum(hann * hann, axis=1)
         valid_scale = (counts > 0.0) & (window_ss > 0.0) & (median_fs > 0.0)
+        # Substitute the sentinel into the *input*, not the result: padded rows
+        # carry window_ss == 0, and 1/sqrt(0) would leave an inf in the branch
+        # jnp.where discards, poisoning reverse-mode gradients. Clamping the
+        # result instead would also rescale genuinely low-energy windows -- a
+        # handful of samples near a window edge has sum(hann^2) << 1, and the
+        # CPU backends apply the true scale there.
+        safe_window_ss = jnp.where(valid_scale, window_ss, 1.0)
         scale = jnp.where(
             valid_scale,
-            1.0 / jnp.sqrt(median_fs * jnp.maximum(window_ss, 1.0)),
+            1.0 / jnp.sqrt(median_fs * safe_window_ss),
             0.0,
         )
         return coefficients * scale[:, None, None]
@@ -411,7 +469,11 @@ def compute_nustft(
     metadata is synchronized to construct the ragged sliding windows.
 
     Args:
-        timestamps: Sorted one-dimensional JAX-compatible timestamps.
+        timestamps: Sorted one-dimensional JAX-compatible timestamps. NumPy
+            input is centered on the first sample in float64 before it reaches
+            the device, so absolute epoch values are safe without x64. A JAX
+            array is used at whatever dtype the caller built it with, and is
+            rejected if that dtype cannot resolve the sample spacing.
         signal: One-dimensional JAX-compatible sample values.
         window_s: Window duration in seconds.
         overlap_s: Window overlap in seconds.
@@ -432,11 +494,7 @@ def compute_nustft(
         raise ValueError("eps must be > 0")
 
     jax, jnp, nufft1 = _dependencies()
-    raw_timestamps = jnp.asarray(timestamps)
-    # The CPU API reports times relative to the first sample. Center before the
-    # unit conversion for the same convention and to preserve float32 precision
-    # when callers provide large absolute timestamps.
-    t = (raw_timestamps - raw_timestamps[0]) * _timestamp_scale(ts_unit)
+    t, timestamp_gap_s = _to_centered_seconds(jax, jnp, timestamps, ts_unit)
     s = jnp.asarray(signal)
     if t.ndim != 1 or s.ndim != 1:
         raise ValueError("timestamps and signal must be one-dimensional")
@@ -450,11 +508,21 @@ def compute_nustft(
     positive = jnp.isfinite(diffs) & (diffs > 0.0)
     n_positive = int(jax.device_get(jnp.sum(positive)))
     if n_positive == 0:
-        raise ValueError("timestamps must contain at least one positive time step")
+        raise ValueError(
+            "timestamps must contain at least one positive time step"
+            + _timestamp_precision_hint(timestamp_gap_s)
+        )
     ordered_diffs = jnp.sort(jnp.where(positive, diffs, jnp.inf))
     dt_median = float(jax.device_get(ordered_diffs[n_positive // 2]))
     if not math.isfinite(dt_median) or dt_median <= 0.0:
         raise ValueError("median timestamp spacing must be finite and > 0")
+    if timestamp_gap_s > 0.5 * dt_median:
+        raise ValueError(
+            "the supplied JAX timestamp array cannot resolve its own sample "
+            f"spacing: its dtype represents values only to within {timestamp_gap_s:.3g} s "
+            f"at this magnitude, but the median spacing is {dt_median:.3g} s."
+            + _TIMESTAMP_PRECISION_REMEDY
+        )
     median_fs = 1.0 / dt_median
 
     if target_fs is not None and target_fs > median_fs:

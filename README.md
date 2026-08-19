@@ -134,7 +134,7 @@ python -m pip install '.[jax]'
 ```python
 import jax
 import jax.numpy as jnp
-from senpy import jax as senpy_jax
+from senpy import jax_backend as senpy_jax
 
 timestamps = jnp.arange(3_000, dtype=jnp.float32) / 50.0
 signal = jnp.sin(2 * jnp.pi * 3.0 * timestamps)
@@ -144,19 +144,22 @@ result = senpy_jax.compute_nustft(
 print(jax.devices(), result.coefficients.shape)
 ```
 
-`senpy.jax` uses `jax-finufft`'s type-1 transform; a CUDA-enabled
+`senpy.jax_backend` uses `jax-finufft`'s type-1 transform; a CUDA-enabled
 `jax-finufft` build dispatches it to cuFINUFFT. It returns JAX arrays rather
 than `senpy.api.NUSTFTResult`, so subsequent JAX work stays device-resident.
 The GPU default is `eps=1e-6`; enable JAX x64 before importing JAX if the
-application requires float64 precision. For absolute microsecond timestamps,
-either enable x64 before creating the JAX arrays or pass timestamps relative to
-the first sample.
+application requires float64 precision. Absolute epoch timestamps are safe to
+pass as NumPy arrays -- they are centered on the first sample in float64 before
+reaching the device. If you build the timestamp array with JAX yourself, either
+enable x64 first or make the values relative to the first sample; float32 cannot
+resolve millisecond spacing at epoch magnitude, and `compute_nustft` rejects
+such an array rather than returning a wrongly scaled result.
 
 For high-throughput three-axis work across recordings, pre-pack ragged windows
 into a small set of static shapes, then run each batch on the JAX device:
 
 ```python
-from senpy import jax as senpy_jax
+from senpy import jax_backend as senpy_jax
 
 # Each sample array is shaped [N, 3] for x/y/z. The packer only discovers and
 # pads windows; it does not import JAX or execute a transform.
