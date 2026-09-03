@@ -47,9 +47,9 @@ class _DeviceJax(_HostJax):
     Array = np.ndarray
 
 
-def _fake_nufft1(nfft, strengths, points, *, eps, iflag):
+def _fake_nufft1(nfft, strengths, points, *, eps, iflag, opts=None):
     """A dense type-1 transform: exact, and sensitive to every coordinate."""
-    del eps
+    del eps, opts
     modes = np.arange(nfft) - nfft // 2
     return np.exp(1j * iflag * np.outer(modes, points)) @ strengths
 
