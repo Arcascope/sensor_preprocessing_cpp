@@ -22,8 +22,8 @@ class _FakeJax:
         return mapped
 
 
-def _fake_nufft1(nfft, strengths, points, *, eps, iflag):
-    del points, eps, iflag
+def _fake_nufft1(nfft, strengths, points, *, eps, iflag, opts=None):
+    del points, eps, iflag, opts
     return np.repeat(np.sum(strengths, axis=1, keepdims=True), nfft, axis=1)
 
 

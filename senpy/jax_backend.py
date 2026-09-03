@@ -10,10 +10,15 @@ CUDA-enabled jax-finufft build dispatches ``nufft1`` to cuFINUFFT.
 
 from __future__ import annotations
 
+import importlib.util
 import math
+import os
+import platform
+import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, DefaultDict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
@@ -22,8 +27,75 @@ import numpy as np
 AXIS_ORDER_TIME_FREQUENCY = "time_frequency"
 
 
+def _otool_dep(binary_path: str, name_fragment: str) -> Optional[str]:
+    """First dependency of ``binary_path`` whose filename contains ``name_fragment``."""
+    try:
+        out = subprocess.run(
+            ["otool", "-L", binary_path], capture_output=True, text=True, timeout=10
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines()[1:]:
+        dep = line.strip().split(" ")[0]
+        if name_fragment in os.path.basename(dep).lower():
+            return dep
+    return None
+
+
+@lru_cache(maxsize=None)
+def _unify_macos_openmp_runtime() -> bool:
+    """Make jax-finufft dlopen the same ``libomp.dylib`` senpy's C++ core does.
+
+    On macOS, senpy's CPU extension (``senpy._core`` / the bundled
+    ``libfinufft.dylib``) links Homebrew's ``libomp.dylib``, while the
+    ``jax-finufft`` wheel vendors its own, physically distinct copy under
+    ``jax_finufft/.dylibs/``. Two live OpenMP runtimes in one process corrupt
+    each other's global state the moment either one is used -- regardless of
+    thread count -- and whichever initializes second crashes (GitHub issue
+    #11). ``jax-finufft`` resolves its copy through a relative
+    ``@loader_path`` dependency, so replacing that file with a symlink to
+    senpy's Homebrew copy — before jax-finufft's extension is ever loaded —
+    collapses both to the one physical image dyld already knows about.
+    Returns True once the two are unified (or already were); False if this
+    could not be done (e.g. no write access, or senpy._core isn't present),
+    in which case callers should fall back to a same-process safety net.
+    """
+    if platform.system() != "Darwin":
+        return True
+
+    core_spec = importlib.util.find_spec("senpy._core")
+    if core_spec is None or core_spec.origin is None:
+        return False
+    homebrew_libomp = _otool_dep(core_spec.origin, "libomp")
+    if not homebrew_libomp or not os.path.exists(homebrew_libomp):
+        return False
+
+    jf_spec = importlib.util.find_spec("jax_finufft")
+    if jf_spec is None or not jf_spec.submodule_search_locations:
+        return False
+    jf_dir = Path(next(iter(jf_spec.submodule_search_locations)))
+    vendored_candidates = list(jf_dir.glob(".dylibs/libomp*.dylib"))
+    if not vendored_candidates:
+        return True  # jax-finufft isn't carrying its own copy to conflict with.
+    vendored = vendored_candidates[0]
+
+    try:
+        if vendored.resolve(strict=True) == Path(homebrew_libomp).resolve(strict=True):
+            return True  # Already unified by an earlier import in this environment.
+        # Only splice in a build-compatible OpenMP: mismatched ABI versions
+        # would turn a segfault-on-use bug into a segfault-on-load bug.
+        if _otool_dep(str(vendored), "libomp") is None:
+            return False
+        vendored.unlink()
+        vendored.symlink_to(homebrew_libomp)
+    except OSError:
+        return False
+    return True
+
+
 def _dependencies() -> Tuple[Any, Any, Any]:
     """Import optional dependencies only when this backend is used."""
+    _unify_macos_openmp_runtime()
     try:
         import jax
         import jax.numpy as jnp
@@ -34,6 +106,32 @@ def _dependencies() -> Tuple[Any, Any, Any]:
             "for your device, then install 'senpy[jax]'."
         ) from exc
     return jax, jnp, nufft1
+
+
+@lru_cache(maxsize=None)
+def _nufft_opts() -> Optional[Any]:
+    """Options passed to every ``nufft1`` call, or ``None`` to use jax-finufft's own default.
+
+    Falls back to pinning jax-finufft to a single thread when the two
+    packages' OpenMP runtimes could not be unified (see
+    ``_unify_macos_openmp_runtime``): with two distinct runtimes still in the
+    process, a single-threaded transform never triggers the worker-thread
+    startup path where the segfault (GitHub issue #11) occurs.
+    """
+    if platform.system() != "Darwin" or _unify_macos_openmp_runtime():
+        return None
+    from jax_finufft.options import Opts
+
+    return Opts(nthreads=1)
+
+
+def _nufft1(*args: Any, **kwargs: Any) -> Any:
+    """``jax_finufft.nufft1``, guarded against issue #11's macOS OpenMP crash."""
+    _, _, nufft1 = _dependencies()
+    opts = _nufft_opts()
+    if opts is not None:
+        kwargs.setdefault("opts", opts)
+    return nufft1(*args, **kwargs)
 
 
 def _normalize_kind(kind: str) -> str:
@@ -227,7 +325,7 @@ def _nustft_window_batch_transform(
     eps: float,
 ) -> Any:
     """Build and cache a static-shape batched type-1 NUFFT executable."""
-    jax, jnp, nufft1 = _dependencies()
+    jax, jnp, _ = _dependencies()
     mode_indices = jnp.concatenate(
         (jnp.arange(nfft_padded // 2, nfft_padded), jnp.array([0]))
     )
@@ -239,7 +337,7 @@ def _nustft_window_batch_transform(
         # The three accelerometer channels have identical non-uniform points.
         # jax-finufft can therefore lower this as a transform stack (the
         # cuFINUFFT ntrans analogue) rather than three unrelated transforms.
-        modes = nufft1(nfft_padded, strengths_3m, points_m, eps=eps, iflag=1)
+        modes = _nufft1(nfft_padded, strengths_3m, points_m, eps=eps, iflag=1)
         return modes[:, mode_indices] * phase_correction
 
     @jax.jit
@@ -493,7 +591,7 @@ def compute_nustft(
     if eps <= 0.0:
         raise ValueError("eps must be > 0")
 
-    jax, jnp, nufft1 = _dependencies()
+    jax, jnp, _ = _dependencies()
     t, timestamp_gap_s = _to_centered_seconds(jax, jnp, timestamps, ts_unit)
     s = jnp.asarray(signal)
     if t.ndim != 1 or s.ndim != 1:
@@ -574,7 +672,7 @@ def compute_nustft(
                 centered = s_window - jnp.mean(s_window) if detrend else s_window
                 strengths = (centered * hann).astype(complex_dtype)
                 points = 2.0 * jnp.pi * tau - jnp.pi
-                modes = nufft1(nfft_padded, strengths, points, eps=eps, iflag=1)
+                modes = _nufft1(nfft_padded, strengths, points, eps=eps, iflag=1)
                 scale = 1.0 / jnp.sqrt(median_fs * jnp.sum(hann * hann))
                 return modes[mode_indices] * phase_correction * scale
 
