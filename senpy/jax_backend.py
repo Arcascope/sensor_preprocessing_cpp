@@ -5,7 +5,9 @@ remain JAX arrays, so a CUDA-enabled JAX installation can execute the NUFFT
 without converting signal samples through NumPy or ``senpy._core``.
 
 Install ``jax-finufft`` alongside the JAX build for the desired platform.  A
-CUDA-enabled jax-finufft build dispatches ``nufft1`` to cuFINUFFT.
+CUDA-enabled jax-finufft build dispatches ``nufft1`` to cuFINUFFT.  On MPS,
+SenPy registers a one-dimensional type-1 gridding-NUFFT lowering because
+FINUFFT does not provide a Metal implementation.
 """
 
 from __future__ import annotations
@@ -105,7 +107,149 @@ def _dependencies() -> Tuple[Any, Any, Any]:
             "senpy.jax_backend requires JAX and jax-finufft. Install a JAX build "
             "for your device, then install 'senpy[jax]'."
         ) from exc
+    _register_mps_nufft1_lowering(jax, jnp)
     return jax, jnp, nufft1
+
+
+def _gaussian_type1_nufft(
+    jnp: Any,
+    jax: Any,
+    source: Any,
+    points: Any,
+    *,
+    output_size: int,
+    iflag: int,
+    modeord: int,
+    eps: float,
+) -> Any:
+    """One-dimensional type-1 NUFFT using Gaussian gridding.
+
+    ``jax_finufft`` has already flattened its public inputs to ``source`` with
+    shape ``[problem, transform, point]`` and ``points`` with shape
+    ``[problem, point]`` before its primitive reaches this implementation.
+
+    Non-uniform strengths are spread onto a twice-oversampled periodic grid
+    with a compact Gaussian kernel.  A regular FFT evaluates that grid, after
+    which the requested modes are selected and the Gaussian is deconvolved.
+    The work is O(Mw + n log n), where ``w`` is set by ``eps``.
+    """
+    oversampled_size = 1 << (2 * output_size - 1).bit_length()
+    oversampling = oversampled_size / output_size
+
+    # Balance Gaussian truncation error against aliasing error at the edge of
+    # the requested mode band.  MPS computes in float32, so asking the kernel
+    # to resolve below float32 epsilon only increases work without accuracy.
+    effective_eps = max(float(eps), float(np.finfo(np.float32).eps))
+    exponent_rate = math.pi * math.sqrt(1.0 - 1.0 / oversampling)
+    radius = max(2, math.ceil(-math.log(effective_eps) / exponent_rate) + 1)
+    alpha = exponent_rate / radius
+
+    offsets = jnp.arange(-radius, radius + 1)
+    grid_points = (points + jnp.pi) * (oversampled_size / (2.0 * jnp.pi))
+    centers = jnp.floor(grid_points).astype(jnp.int32)
+    unwrapped_indices = centers[..., None] + offsets
+    wrapped_indices = jnp.mod(unwrapped_indices, oversampled_size)
+    weights = jnp.exp(
+        -alpha * (grid_points[..., None] - unwrapped_indices) ** 2
+    )
+
+    def spread_one_problem(
+        problem_source: Any, problem_indices: Any, problem_weights: Any
+    ) -> Any:
+        transform_count = problem_source.shape[0]
+        contributions = (
+            problem_source[:, :, None] * problem_weights[None, :, :]
+        ).reshape(transform_count, -1)
+        return (
+            jnp.zeros(
+                (transform_count, oversampled_size), dtype=problem_source.dtype
+            )
+            .at[:, problem_indices.reshape(-1)]
+            .add(contributions)
+        )
+
+    grid = jax.vmap(spread_one_problem)(source, wrapped_indices, weights)
+    if iflag == 1:
+        spectrum = jnp.fft.ifft(grid, axis=-1) * oversampled_size
+    elif iflag == -1:
+        spectrum = jnp.fft.fft(grid, axis=-1)
+    else:
+        raise ValueError("iflag must be +1 or -1")
+
+    if modeord == 0:
+        modes = jnp.arange(-(output_size // 2), (output_size + 1) // 2)
+    elif modeord == 1:
+        modes = jnp.concatenate(
+            (
+                jnp.arange(0, (output_size + 1) // 2),
+                jnp.arange(-(output_size // 2), 0),
+            )
+        )
+    else:
+        raise ValueError(f"Unsupported modeord: {modeord}")
+
+    gaussian_transform = jnp.sqrt(jnp.pi / alpha) * jnp.exp(
+        -(jnp.pi * modes / oversampled_size) ** 2 / alpha
+    )
+    origin_phase = jnp.where(jnp.mod(modes, 2) == 0, 1.0, -1.0)
+    return (
+        spectrum[..., jnp.mod(modes, oversampled_size)]
+        * origin_phase
+        / gaussian_transform
+    )
+
+
+@lru_cache(maxsize=None)
+def _register_mps_nufft1_lowering(jax: Any, jnp: Any) -> bool:
+    """Install SenPy's 1-D type-1 fallback for ``jax_finufft`` on MPS.
+
+    FINUFFT provides CPU and CUDA kernels but no Metal implementation.  This
+    lowering uses Gaussian spreading, an oversampled FFT, and deconvolution,
+    all expressed as ordinary JAX operations that remain on the MPS device.
+    """
+    # Backend discovery loads PJRT plugins and teaches JAX that ``mps`` is a
+    # valid lowering platform.  Registering before this point raises "unknown
+    # platform mps" even when jax-mps is installed.
+    if jax.default_backend() != "mps":
+        return False
+
+    from jax._src.interpreters import mlir
+    from jax_finufft.ops import nufft1_p
+
+    def lowering(
+        ctx: Any,
+        source: Any,
+        *points: Any,
+        output_shape: Tuple[int, ...],
+        iflag: int,
+        eps: float,
+        opts: Any,
+        nufft_type: int,
+    ) -> Any:
+        if nufft_type != 1 or len(points) != 1 or len(output_shape) != 1:
+            raise NotImplementedError(
+                "SenPy's MPS jax_finufft lowering supports only 1-D type-1 NUFFTs"
+            )
+        modeord = int(getattr(opts, "modeord", 0)) if opts is not None else 0
+
+        def implementation(source: Any, point: Any) -> Any:
+            return _gaussian_type1_nufft(
+                jnp,
+                jax,
+                source,
+                point,
+                output_size=int(output_shape[0]),
+                iflag=int(iflag),
+                modeord=modeord,
+                eps=float(eps),
+            )
+
+        return mlir.lower_fun(implementation, multiple_results=False)(
+            ctx, source, points[0]
+        )
+
+    mlir.register_lowering(nufft1_p, lowering, platform="mps")
+    return True
 
 
 @lru_cache(maxsize=None)
