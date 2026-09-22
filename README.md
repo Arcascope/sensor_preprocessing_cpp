@@ -119,16 +119,16 @@ FoundryWhoopAndroid, which computes 30 s sleep-staging features one strap packet
 because it deletes the raw samples after upload; its Kotlin implementation and this one agree to
 float32 storage precision on the same fixture.
 
-### JAX / NVIDIA CUDA NUFFT
+### JAX NUFFT (CPU / CUDA / Metal)
 
 The regular `senpy` API remains NumPy/C++ based. For a JAX-native NUFFT that
-keeps sample arrays on the active JAX device, install `jax-finufft` with the
-JAX build appropriate for the machine:
+keeps sample arrays on the active JAX device, install the `jax` extra:
 
 ```bash
-# First install JAX with its CUDA support using JAX's installation guidance.
-# Then, from this repository's senpy/ directory:
+# CPU-only:
 python -m pip install '.[jax]'
+# GPU (CUDA), from this repository's senpy/ directory:
+python -m pip install '.[jax]' 'jax[cuda12]'
 ```
 
 ```python
@@ -144,16 +144,24 @@ result = senpy_jax.compute_nustft(
 print(jax.devices(), result.coefficients.shape)
 ```
 
-`senpy.jax_backend` uses `jax-finufft`'s type-1 transform; a CUDA-enabled
-`jax-finufft` build dispatches it to cuFINUFFT. It returns JAX arrays rather
-than `senpy.api.NUSTFTResult`, so subsequent JAX work stays device-resident.
-The GPU default is `eps=1e-6`; enable JAX x64 before importing JAX if the
-application requires float64 precision. Absolute epoch timestamps are safe to
-pass as NumPy arrays -- they are centered on the first sample in float64 before
-reaching the device. If you build the timestamp array with JAX yourself, either
-enable x64 first or make the values relative to the first sample; float32 cannot
-resolve millisecond spacing at epoch magnitude, and `compute_nustft` rejects
-such an array rather than returning a wrongly scaled result.
+`senpy.jax_backend` implements its own type-1 NUFFT (`nufft1`, Gaussian
+gridding + FFT + deconvolution) in pure `jax.numpy`/`jax.vmap` -- there is no
+compiled NUFFT dependency and no platform-specific lowering. It runs
+unconditionally wherever JAX runs: CPU, CUDA, and Metal all take the same
+code path, so there is no separate GPU build to install and no macOS/OpenMP
+interaction to work around. It returns JAX arrays rather than
+`senpy.api.NUSTFTResult`, so subsequent JAX work stays device-resident.
+`eps=1e-6` is the default everywhere (not GPU-specific), giving ~2e-5
+relative error against a brute-force reference; the effective eps is floored
+at float32 epsilon (~1.19e-7) regardless of platform, so requesting a smaller
+value than that has no effect. Enable JAX x64 before importing JAX if the
+application needs float64 arithmetic elsewhere in the pipeline. Absolute
+epoch timestamps are safe to pass as NumPy arrays -- they are centered on the
+first sample in float64 before reaching the device. If you build the
+timestamp array with JAX yourself, either enable x64 first or make the values
+relative to the first sample; float32 cannot resolve millisecond spacing at
+epoch magnitude, and `compute_nustft` rejects such an array rather than
+returning a wrongly scaled result.
 
 For high-throughput three-axis work across recordings, pre-pack ragged windows
 into a small set of static shapes, then run each batch on the JAX device:
