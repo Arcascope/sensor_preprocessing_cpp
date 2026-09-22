@@ -4,10 +4,16 @@ This module is deliberately separate from :mod:`senpy.api`: its result arrays
 remain JAX arrays, so a CUDA-enabled JAX installation can execute the NUFFT
 without converting signal samples through NumPy or ``senpy._core``.
 
-Install ``jax-finufft`` alongside the JAX build for the desired platform.  A
-CUDA-enabled jax-finufft build dispatches ``nufft1`` to cuFINUFFT.  On MPS,
-SenPy registers a one-dimensional type-1 gridding-NUFFT lowering because
-FINUFFT does not provide a Metal implementation.
+The type-1 NUFFT is SenPy's own, written in ordinary JAX operations
+(:func:`_gaussian_type1_nufft`): Gaussian spreading onto an oversampled
+periodic grid, one FFT, then mode selection and deconvolution. It therefore
+runs wherever JAX runs -- CPU, CUDA, Metal -- with no compiled NUFFT
+dependency and no platform-specific lowering to keep in step.
+
+This replaces ``jax-finufft``, which supplied CPU and CUDA kernels but no
+Metal one, pinned JAX to an old release through its use of a private JAX
+name, and shipped a second OpenMP runtime that collided with SenPy's own on
+macOS. Only ``jax`` is needed now.
 """
 
 from __future__ import annotations
@@ -29,86 +35,17 @@ import numpy as np
 AXIS_ORDER_TIME_FREQUENCY = "time_frequency"
 
 
-def _otool_dep(binary_path: str, name_fragment: str) -> Optional[str]:
-    """First dependency of ``binary_path`` whose filename contains ``name_fragment``."""
-    try:
-        out = subprocess.run(
-            ["otool", "-L", binary_path], capture_output=True, text=True, timeout=10
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    for line in out.splitlines()[1:]:
-        dep = line.strip().split(" ")[0]
-        if name_fragment in os.path.basename(dep).lower():
-            return dep
-    return None
-
-
-@lru_cache(maxsize=None)
-def _unify_macos_openmp_runtime() -> bool:
-    """Make jax-finufft dlopen the same ``libomp.dylib`` senpy's C++ core does.
-
-    On macOS, senpy's CPU extension (``senpy._core`` / the bundled
-    ``libfinufft.dylib``) links Homebrew's ``libomp.dylib``, while the
-    ``jax-finufft`` wheel vendors its own, physically distinct copy under
-    ``jax_finufft/.dylibs/``. Two live OpenMP runtimes in one process corrupt
-    each other's global state the moment either one is used -- regardless of
-    thread count -- and whichever initializes second crashes (GitHub issue
-    #11). ``jax-finufft`` resolves its copy through a relative
-    ``@loader_path`` dependency, so replacing that file with a symlink to
-    senpy's Homebrew copy — before jax-finufft's extension is ever loaded —
-    collapses both to the one physical image dyld already knows about.
-    Returns True once the two are unified (or already were); False if this
-    could not be done (e.g. no write access, or senpy._core isn't present),
-    in which case callers should fall back to a same-process safety net.
-    """
-    if platform.system() != "Darwin":
-        return True
-
-    core_spec = importlib.util.find_spec("senpy._core")
-    if core_spec is None or core_spec.origin is None:
-        return False
-    homebrew_libomp = _otool_dep(core_spec.origin, "libomp")
-    if not homebrew_libomp or not os.path.exists(homebrew_libomp):
-        return False
-
-    jf_spec = importlib.util.find_spec("jax_finufft")
-    if jf_spec is None or not jf_spec.submodule_search_locations:
-        return False
-    jf_dir = Path(next(iter(jf_spec.submodule_search_locations)))
-    vendored_candidates = list(jf_dir.glob(".dylibs/libomp*.dylib"))
-    if not vendored_candidates:
-        return True  # jax-finufft isn't carrying its own copy to conflict with.
-    vendored = vendored_candidates[0]
-
-    try:
-        if vendored.resolve(strict=True) == Path(homebrew_libomp).resolve(strict=True):
-            return True  # Already unified by an earlier import in this environment.
-        # Only splice in a build-compatible OpenMP: mismatched ABI versions
-        # would turn a segfault-on-use bug into a segfault-on-load bug.
-        if _otool_dep(str(vendored), "libomp") is None:
-            return False
-        vendored.unlink()
-        vendored.symlink_to(homebrew_libomp)
-    except OSError:
-        return False
-    return True
-
-
-def _dependencies() -> Tuple[Any, Any, Any]:
-    """Import optional dependencies only when this backend is used."""
-    _unify_macos_openmp_runtime()
+def _dependencies() -> Tuple[Any, Any]:
+    """Import JAX only when this backend is used."""
     try:
         import jax
         import jax.numpy as jnp
-        from jax_finufft import nufft1
     except ImportError as exc:
         raise ImportError(
-            "senpy.jax_backend requires JAX and jax-finufft. Install a JAX build "
-            "for your device, then install 'senpy[jax]'."
+            "senpy.jax_backend requires JAX. Install a JAX build for your "
+            "device, then install 'senpy[jax]'."
         ) from exc
-    _register_mps_nufft1_lowering(jax, jnp)
-    return jax, jnp, nufft1
+    return jax, jnp
 
 
 def _gaussian_type1_nufft(
@@ -124,9 +61,9 @@ def _gaussian_type1_nufft(
 ) -> Any:
     """One-dimensional type-1 NUFFT using Gaussian gridding.
 
-    ``jax_finufft`` has already flattened its public inputs to ``source`` with
-    shape ``[problem, transform, point]`` and ``points`` with shape
-    ``[problem, point]`` before its primitive reaches this implementation.
+    Inputs arrive already flattened by :func:`nufft1` to ``source`` with shape
+    ``[problem, transform, point]`` and ``points`` with shape
+    ``[problem, point]``.
 
     Non-uniform strengths are spread onto a twice-oversampled periodic grid
     with a compact Gaussian kernel.  A regular FFT evaluates that grid, after
@@ -199,83 +136,62 @@ def _gaussian_type1_nufft(
     )
 
 
-@lru_cache(maxsize=None)
-def _register_mps_nufft1_lowering(jax: Any, jnp: Any) -> bool:
-    """Install SenPy's 1-D type-1 fallback for ``jax_finufft`` on MPS.
+def nufft1(
+    output_size: int,
+    source: Any,
+    points: Any,
+    *,
+    eps: float = 1e-6,
+    iflag: int = 1,
+    modeord: int = 0,
+) -> Any:
+    """One-dimensional type-1 NUFFT, evaluated in pure JAX.
 
-    FINUFFT provides CPU and CUDA kernels but no Metal implementation.  This
-    lowering uses Gaussian spreading, an oversampled FFT, and deconvolution,
-    all expressed as ordinary JAX operations that remain on the MPS device.
+    ``points`` has shape ``[..., point]`` and ``source`` either the same shape
+    or ``[..., transform, point]``; a stack of transforms sharing one set of
+    non-uniform points is evaluated together, which is what the three
+    accelerometer channels are. Leading dimensions are problem dimensions and
+    are preserved in the result, whose trailing axis has ``output_size`` modes.
+
+    This is an ordinary JAX function, not a primitive, so ``jit``, ``vmap`` and
+    ``grad`` apply to it by tracing rather than through a registered rule.
     """
-    # Backend discovery loads PJRT plugins and teaches JAX that ``mps`` is a
-    # valid lowering platform.  Registering before this point raises "unknown
-    # platform mps" even when jax-mps is installed.
-    if jax.default_backend() != "mps":
-        return False
-
-    from jax._src.interpreters import mlir
-    from jax_finufft.ops import nufft1_p
-
-    def lowering(
-        ctx: Any,
-        source: Any,
-        *points: Any,
-        output_shape: Tuple[int, ...],
-        iflag: int,
-        eps: float,
-        opts: Any,
-        nufft_type: int,
-    ) -> Any:
-        if nufft_type != 1 or len(points) != 1 or len(output_shape) != 1:
-            raise NotImplementedError(
-                "SenPy's MPS jax_finufft lowering supports only 1-D type-1 NUFFTs"
-            )
-        modeord = int(getattr(opts, "modeord", 0)) if opts is not None else 0
-
-        def implementation(source: Any, point: Any) -> Any:
-            return _gaussian_type1_nufft(
-                jnp,
-                jax,
-                source,
-                point,
-                output_size=int(output_shape[0]),
-                iflag=int(iflag),
-                modeord=modeord,
-                eps=float(eps),
-            )
-
-        return mlir.lower_fun(implementation, multiple_results=False)(
-            ctx, source, points[0]
+    jax, jnp = _dependencies()
+    source = jnp.asarray(source)
+    points = jnp.asarray(points)
+    if points.ndim < 1:
+        raise ValueError("points must have at least a point axis")
+    if source.shape[-1] != points.shape[-1]:
+        raise ValueError(
+            f"source and points disagree on the point axis: "
+            f"{source.shape[-1]} vs {points.shape[-1]}"
         )
 
-    mlir.register_lowering(nufft1_p, lowering, platform="mps")
-    return True
+    # Normalise to the core's [problem, transform, point] / [problem, point].
+    stacked = source.ndim == points.ndim + 1
+    if not stacked and source.ndim != points.ndim:
+        raise ValueError(
+            f"source.ndim must be points.ndim or points.ndim + 1, got "
+            f"{source.shape} and {points.shape}"
+        )
+    problem_shape = points.shape[:-1]
+    point_count = points.shape[-1]
+    transform_count = source.shape[-2] if stacked else 1
 
-
-@lru_cache(maxsize=None)
-def _nufft_opts() -> Optional[Any]:
-    """Options passed to every ``nufft1`` call, or ``None`` to use jax-finufft's own default.
-
-    Falls back to pinning jax-finufft to a single thread when the two
-    packages' OpenMP runtimes could not be unified (see
-    ``_unify_macos_openmp_runtime``): with two distinct runtimes still in the
-    process, a single-threaded transform never triggers the worker-thread
-    startup path where the segfault (GitHub issue #11) occurs.
-    """
-    if platform.system() != "Darwin" or _unify_macos_openmp_runtime():
-        return None
-    from jax_finufft.options import Opts
-
-    return Opts(nthreads=1)
-
-
-def _nufft1(*args: Any, **kwargs: Any) -> Any:
-    """``jax_finufft.nufft1``, guarded against issue #11's macOS OpenMP crash."""
-    _, _, nufft1 = _dependencies()
-    opts = _nufft_opts()
-    if opts is not None:
-        kwargs.setdefault("opts", opts)
-    return nufft1(*args, **kwargs)
+    flat_points = points.reshape(-1, point_count)
+    flat_source = source.reshape(-1, transform_count, point_count)
+    result = _gaussian_type1_nufft(
+        jnp,
+        jax,
+        flat_source,
+        flat_points,
+        output_size=int(output_size),
+        iflag=int(iflag),
+        modeord=int(modeord),
+        eps=float(eps),
+    )
+    tail = (transform_count, output_size) if stacked else (output_size,)
+    return result.reshape(*problem_shape, *tail)
 
 
 def _normalize_kind(kind: str) -> str:
@@ -294,7 +210,7 @@ class JaxSpectrogramResult:
     times: Any
     Sxx: Any
     kind: str = "magnitude"
-    method: str = "jax_finufft"
+    method: str = "senpy_jax"
     axis_order: str = AXIS_ORDER_TIME_FREQUENCY
 
 
@@ -310,7 +226,7 @@ class JaxNUSTFTResult:
     frequencies: Any
     times: Any
     coefficients: Any
-    method: str = "jax_finufft"
+    method: str = "senpy_jax"
     axis_order: str = AXIS_ORDER_TIME_FREQUENCY
 
     @property
@@ -319,12 +235,12 @@ class JaxNUSTFTResult:
 
     @property
     def magnitude(self) -> Any:
-        _, jnp, _ = _dependencies()
+        _, jnp = _dependencies()
         return jnp.abs(self.coefficients)
 
     @property
     def power(self) -> Any:
-        _, jnp, _ = _dependencies()
+        _, jnp = _dependencies()
         return jnp.abs(self.coefficients) ** 2
 
     @property
@@ -351,7 +267,7 @@ class JaxNUSTFTResult:
         kind: str = "psd",
         average: Literal["mean", "median"] = "mean",
     ) -> Tuple[Any, Any]:
-        _, jnp, _ = _dependencies()
+        _, jnp = _dependencies()
         surface = self.spectrogram(kind).Sxx
         if average == "mean":
             return self.frequencies, jnp.nanmean(surface, axis=0)
@@ -469,7 +385,7 @@ def _nustft_window_batch_transform(
     eps: float,
 ) -> Any:
     """Build and cache a static-shape batched type-1 NUFFT executable."""
-    jax, jnp, _ = _dependencies()
+    jax, jnp = _dependencies()
     mode_indices = jnp.concatenate(
         (jnp.arange(nfft_padded // 2, nfft_padded), jnp.array([0]))
     )
@@ -478,10 +394,10 @@ def _nustft_window_batch_transform(
     )
 
     def one_window(points_m: Any, strengths_3m: Any) -> Any:
-        # The three accelerometer channels have identical non-uniform points.
-        # jax-finufft can therefore lower this as a transform stack (the
-        # cuFINUFFT ntrans analogue) rather than three unrelated transforms.
-        modes = _nufft1(nfft_padded, strengths_3m, points_m, eps=eps, iflag=1)
+        # The three accelerometer channels have identical non-uniform points,
+        # so they ride one spreading pass as a transform stack rather than
+        # three unrelated transforms.
+        modes = nufft1(nfft_padded, strengths_3m, points_m, eps=eps, iflag=1)
         return modes[:, mode_indices] * phase_correction
 
     @jax.jit
@@ -541,7 +457,7 @@ def compute_nustft_window_batch(
         median_fs: Positive scalar or ``[B]`` array used for each row's CPU
             compatible density normalization.
         detrend: Subtract each valid row/channel mean before applying Hann.
-        eps: Requested jax-finufft relative accuracy.
+        eps: Requested relative accuracy of the NUFFT.
 
     Returns:
         JAX complex coefficients shaped ``[B, 3, nfft_padded // 2 + 1]``.
@@ -559,7 +475,7 @@ def compute_nustft_window_batch(
     if len(signals_shape) != 3 or signals_shape != (points_shape[0], 3, points_shape[1]):
         raise ValueError("signals must have shape [B, 3, M] matching points")
 
-    _, jnp, _ = _dependencies()
+    _, jnp = _dependencies()
     median_fs_array = jnp.asarray(median_fs)
     if median_fs_array.ndim > 1 or (
         median_fs_array.ndim == 1 and median_fs_array.shape[0] != points_shape[0]
@@ -703,7 +619,7 @@ def compute_nustft(
     detrend: bool = True,
     eps: float = 1e-6,
 ) -> JaxNUSTFTResult:
-    """Compute a device-resident non-uniform STFT using ``jax-finufft``.
+    """Compute a device-resident non-uniform STFT.
 
     The transform uses type-1 FINUFFT with the same positive-frequency mode
     order, Hann taper, detrending, and density scaling as the CPU API. The
@@ -723,7 +639,7 @@ def compute_nustft(
         target_fs: Optional maximum output sample rate. It must not exceed the
             observed median sample rate, so requested bins are exact NUFFT bins.
         detrend: Subtract each window mean before applying the Hann taper.
-        eps: Requested jax-finufft relative accuracy. Use ``1e-6`` for typical
+        eps: Requested relative accuracy of the NUFFT. Use ``1e-6`` for typical
             GPU float32 use; enable JAX x64 before importing JAX for float64.
     """
     if not window_s > 0.0:
@@ -735,7 +651,7 @@ def compute_nustft(
     if eps <= 0.0:
         raise ValueError("eps must be > 0")
 
-    jax, jnp, _ = _dependencies()
+    jax, jnp = _dependencies()
     t, timestamp_gap_s = _to_centered_seconds(jax, jnp, timestamps, ts_unit)
     s = jnp.asarray(signal)
     if t.ndim != 1 or s.ndim != 1:
@@ -816,7 +732,7 @@ def compute_nustft(
                 centered = s_window - jnp.mean(s_window) if detrend else s_window
                 strengths = (centered * hann).astype(complex_dtype)
                 points = 2.0 * jnp.pi * tau - jnp.pi
-                modes = _nufft1(nfft_padded, strengths, points, eps=eps, iflag=1)
+                modes = nufft1(nfft_padded, strengths, points, eps=eps, iflag=1)
                 scale = 1.0 / jnp.sqrt(median_fs * jnp.sum(hann * hann))
                 return modes[mode_indices] * phase_correction * scale
 

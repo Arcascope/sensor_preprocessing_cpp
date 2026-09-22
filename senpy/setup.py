@@ -132,9 +132,15 @@ setup(
     py_modules=['senpy', 'senpy.api', 'senpy.jax_backend', 'senpy._version', "senpy._core"],
     install_requires=['pybind11>=2.6.0', 'numpy>=1.19.0'],
     extras_require={
-        # Install the CUDA-enabled JAX distribution separately when GPU support
-        # is required; this extra intentionally does not choose a CUDA version.
-        'jax': ['jax-finufft>=1.3.0'],
+        # Just JAX: the NUFFT is pure JAX now, so there is no compiled
+        # binding to pin and no version ceiling to carry.
+        #
+        # This deliberately does not choose a CUDA version -- a library should
+        # not decide that for the application. `pip install jax` is CPU-only;
+        # for GPU, install the CUDA build alongside it:
+        #
+        #     pip install 'senpy[jax]' 'jax[cuda12]'
+        'jax': ['jax'],
     },
     setup_requires=['pybind11>=2.6.0'],
     cmdclass={'build_ext': SenpyBuildExt},
