@@ -22,8 +22,8 @@ class _FakeJax:
         return mapped
 
 
-def _fake_nufft1(nfft, strengths, points, *, eps, iflag, opts=None):
-    del points, eps, iflag, opts
+def _fake_nufft1(nfft, strengths, points, *, eps=1e-6, iflag=1, modeord=0):
+    del points, eps, iflag, modeord
     return np.repeat(np.sum(strengths, axis=1, keepdims=True), nfft, axis=1)
 
 
@@ -103,11 +103,10 @@ def test_packer_rejects_non_three_axis_or_unsorted_recordings():
 
 
 def test_window_batch_masks_padded_samples_and_rows_without_optional_jax(monkeypatch):
-    monkeypatch.setattr(
-        senpy_jax,
-        "_dependencies",
-        lambda: (_FakeJax(), np, _fake_nufft1),
-    )
+    # The NUFFT is now a module-level function rather than something handed
+    # back by _dependencies, so the seam for the fake moved with it.
+    monkeypatch.setattr(senpy_jax, "_dependencies", lambda: (_FakeJax(), np))
+    monkeypatch.setattr(senpy_jax, "nufft1", _fake_nufft1)
     points = np.array([[-np.pi, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]])
     valid = np.array([[True, True, False, False], [False, False, False, False]])
     signals = np.array(
@@ -134,11 +133,10 @@ def test_low_energy_window_keeps_its_true_hann_scale(monkeypatch):
     is ``1/sqrt(fs * sum(hann^2))`` in both CPU backends, with no floor, so the
     batched path must not clamp the divisor either.
     """
-    monkeypatch.setattr(
-        senpy_jax,
-        "_dependencies",
-        lambda: (_FakeJax(), np, _fake_nufft1),
-    )
+    # The NUFFT is now a module-level function rather than something handed
+    # back by _dependencies, so the seam for the fake moved with it.
+    monkeypatch.setattr(senpy_jax, "_dependencies", lambda: (_FakeJax(), np))
+    monkeypatch.setattr(senpy_jax, "nufft1", _fake_nufft1)
     # Four samples in the first 0.4% of the window, plus an all-padding row.
     tau = np.array([0.001, 0.002, 0.003, 0.004])
     points = np.vstack((2.0 * np.pi * tau - np.pi, np.zeros(4)))

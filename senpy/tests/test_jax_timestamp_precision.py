@@ -47,17 +47,16 @@ class _DeviceJax(_HostJax):
     Array = np.ndarray
 
 
-def _fake_nufft1(nfft, strengths, points, *, eps, iflag, opts=None):
+def _fake_nufft1(nfft, strengths, points, *, eps=1e-6, iflag=1, modeord=0):
     """A dense type-1 transform: exact, and sensitive to every coordinate."""
-    del eps, opts
+    del eps, modeord
     modes = np.arange(nfft) - nfft // 2
     return np.exp(1j * iflag * np.outer(modes, points)) @ strengths
 
 
 def _install(monkeypatch, jax_stub):
-    monkeypatch.setattr(
-        senpy_jax, "_dependencies", lambda: (jax_stub, _Float32Numpy(), _fake_nufft1)
-    )
+    monkeypatch.setattr(senpy_jax, "_dependencies", lambda: (jax_stub, _Float32Numpy()))
+    monkeypatch.setattr(senpy_jax, "nufft1", _fake_nufft1)
 
 
 # 50 Hz for 20 s, expressed as offsets in milliseconds.
