@@ -124,10 +124,12 @@ float32 storage precision on the same fixture.
 The regular `senpy` API remains NumPy/C++ based. For a JAX-native NUFFT that
 keeps sample arrays on the active JAX device, install the `jax` extra:
 
+Run these from this repository's `senpy/` directory:
+
 ```bash
 # CPU-only:
 python -m pip install '.[jax]'
-# GPU (CUDA), from this repository's senpy/ directory:
+# GPU (CUDA):
 python -m pip install '.[jax]' 'jax[cuda12]'
 ```
 
