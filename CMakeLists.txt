@@ -15,8 +15,15 @@ endif()
 # CI runners use x86-64-v3 (AVX2) for portability; local builds use native.
 if(DEFINED ENV{CI} AND "$ENV{CI}" STREQUAL "true")
     set(MARCH_FLAG "-march=x86-64-v3")
+    # FINUFFT defaults FINUFFT_ARCH_FLAGS to "native" (-march=native), which bakes
+    # the build machine's ISA (e.g. AVX-512) into libfinufft.so. Release wheels
+    # must be portable, so pin the dependency to the same baseline as the rest of
+    # the build. This must be a CACHE variable: FINUFFT's own CMakeLists declares
+    # it with `CACHE`, and normal variables do not propagate into its scope.
+    set(FINUFFT_ARCH_FLAGS "-march=x86-64-v3" CACHE STRING "" FORCE)
 else()
     set(MARCH_FLAG "-march=native -mtune=native")
+    set(FINUFFT_ARCH_FLAGS "-march=native" CACHE STRING "" FORCE)
 endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 ${MARCH_FLAG}")
