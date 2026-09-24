@@ -145,6 +145,8 @@ setup(
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
+        'Programming Language :: Python :: 3.14',
         'Programming Language :: C++',
         'Operating System :: POSIX :: Linux',
         'Operating System :: MacOS',
@@ -157,7 +159,7 @@ setup(
     package_data={'senpy': ['*.so', '*.dylib', '*.dll']},
     include_package_data=True,
     py_modules=['senpy', 'senpy.api', 'senpy.jax_backend', 'senpy._version', "senpy._core"],
-    install_requires=['pybind11>=2.6.0', 'numpy>=1.19.0'],
+    install_requires=['pybind11>=3.0', 'numpy>=1.19.0'],
     extras_require={
         # Just JAX: the NUFFT is pure JAX now, so there is no compiled
         # binding to pin and no version ceiling to carry.
@@ -169,7 +171,7 @@ setup(
         #     pip install 'senpy[jax]' 'jax[cuda12]'
         'jax': ['jax'],
     },
-    setup_requires=['pybind11>=2.6.0'],
+    setup_requires=['pybind11>=3.0'],
     cmdclass={'build_ext': SenpyBuildExt},
     zip_safe=False,
     python_requires='>=3.11',

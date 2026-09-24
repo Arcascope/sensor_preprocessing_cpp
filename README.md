@@ -13,6 +13,9 @@ python -m pip install arcascope-senpy
 python -m pip install 'arcascope-senpy[jax]'
 ```
 
+Prebuilt manylinux wheels are published for CPython 3.12, 3.13, and 3.14. Python 3.11 and other
+platforms build from source on install.
+
 To install a specific precompiled wheel from a GitHub release instead:
 
 ```bash
