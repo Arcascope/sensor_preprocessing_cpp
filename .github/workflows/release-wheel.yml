@@ -56,6 +56,24 @@ jobs:
             echo "matrix={\"python-version\":[\"$selected\"]}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - name: Verify tag matches package version
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          tag_version="${TAG#v}"
+          pkg_version=$(python3 -c "exec(open('senpy/_version.py').read()); print(__version__)")
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Tag '$TAG' does not match senpy/_version.py ($pkg_version)." \
+                 "Bump _version.py (and the version test) before releasing."
+            exit 1
+          fi
+          echo "Tag $TAG matches package version $pkg_version"
+
   build-wheel:
     name: Build wheel (cp${{ matrix.python-version }})
     needs: [resolve]
