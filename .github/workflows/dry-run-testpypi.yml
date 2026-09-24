@@ -9,19 +9,43 @@ on:
         default: main
         type: string
       python-version:
-        description: "CPython version to build"
+        description: "CPython version(s) to build"
         required: true
-        default: "3.12"
+        default: "all"
         type: choice
         options:
-          - "3.11"
+          - "all"
           - "3.12"
+          - "3.13"
+          - "3.14"
 
 jobs:
+  resolve:
+    name: Resolve build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.release.outputs.matrix }}
+    steps:
+      - name: Resolve matrix
+        id: release
+        env:
+          SELECTED: ${{ inputs.python-version }}
+        run: |
+          if [ "$SELECTED" = "all" ]; then
+            echo 'matrix={"python-version":["3.12","3.13","3.14"]}' >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix={\"python-version\":[\"$SELECTED\"]}" >> "$GITHUB_OUTPUT"
+          fi
+
   build-wheel:
-    name: Build wheel
+    name: Build wheel (cp${{ matrix.python-version }})
+    needs: [resolve]
     runs-on: ubuntu-22.04
     timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
 
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
@@ -39,7 +63,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: ${{ inputs.python-version }}
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Add swap for native build
@@ -84,13 +108,13 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7
         with:
-          name: testpypi-wheel
+          name: testpypi-wheel-${{ matrix.python-version }}
           path: dist/*.whl
           if-no-files-found: error
 
   publish-testpypi:
     name: Publish to TestPyPI
-    needs: [build-wheel]
+    needs: [resolve, build-wheel]
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -101,6 +125,7 @@ jobs:
       - name: Download distributions
         uses: actions/download-artifact@v8
         with:
+          pattern: testpypi-wheel-*
           path: dist
           merge-multiple: true
 

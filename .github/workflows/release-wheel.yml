@@ -10,13 +10,15 @@ on:
         required: true
         type: string
       python-version:
-        description: "CPython version to build"
+        description: "CPython version(s) to build"
         required: true
-        default: "3.12"
+        default: "all"
         type: choice
         options:
-          - "3.11"
+          - "all"
           - "3.12"
+          - "3.13"
+          - "3.14"
       publish-to-pypi:
         description: "Also publish the built wheel to PyPI"
         required: true
@@ -24,23 +26,14 @@ on:
         type: boolean
 
 jobs:
-  build-wheel:
-    name: Build and attach wheel
-    # 22.04 (glibc 2.35) keeps the manylinux baseline older than latest.
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    permissions:
-      contents: write
-
-    env:
-      CMAKE_BUILD_PARALLEL_LEVEL: "2"
-      CMAKE_INSTALL_PARALLEL_LEVEL: "2"
-      MAKEFLAGS: "-j2"
-      NINJAFLAGS: "-j2"
-      MAX_JOBS: "2"
-
+  resolve:
+    name: Resolve tag and build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      matrix: ${{ steps.release.outputs.matrix }}
     steps:
-      - name: Resolve release tag
+      - name: Resolve release tag and matrix
         id: release
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -50,24 +43,49 @@ jobs:
         run: |
           if [ "$EVENT_NAME" = "release" ]; then
             tag="$RELEASE_TAG"
-            python_version="3.12"
+            selected="all"
           else
             tag="$INPUT_TAG"
-            python_version="$INPUT_PYTHON_VERSION"
+            selected="$INPUT_PYTHON_VERSION"
           fi
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "python-version=$python_version" >> "$GITHUB_OUTPUT"
+          if [ "$selected" = "all" ]; then
+            echo 'matrix={"python-version":["3.12","3.13","3.14"]}' >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix={\"python-version\":[\"$selected\"]}" >> "$GITHUB_OUTPUT"
+          fi
 
+  build-wheel:
+    name: Build wheel (cp${{ matrix.python-version }})
+    needs: [resolve]
+    # 22.04 (glibc 2.35) keeps the manylinux baseline older than latest.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      CMAKE_INSTALL_PARALLEL_LEVEL: "2"
+      MAKEFLAGS: "-j2"
+      NINJAFLAGS: "-j2"
+      MAX_JOBS: "2"
+
+    steps:
       - name: Check out release source
         uses: actions/checkout@v7
         with:
-          ref: ${{ steps.release.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.tag }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: ${{ steps.release.outputs.python-version }}
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Add swap for native build
@@ -112,25 +130,25 @@ jobs:
       - name: Verify release exists
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release.outputs.tag }}
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: gh release view "$TAG"
 
       - name: Upload wheel to release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release.outputs.tag }}
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: gh release upload "$TAG" dist/*.whl --clobber
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7
         with:
-          name: pypi-wheel
+          name: pypi-wheel-${{ matrix.python-version }}
           path: dist/*.whl
           if-no-files-found: error
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [build-wheel]
+    needs: [resolve, build-wheel]
     # On release events always publish; on manual runs only when requested.
     if: github.event_name == 'release' || inputs.publish-to-pypi
     runs-on: ubuntu-latest
@@ -143,6 +161,7 @@ jobs:
       - name: Download distributions
         uses: actions/download-artifact@v8
         with:
+          pattern: pypi-wheel-*
           path: dist
           merge-multiple: true
 
