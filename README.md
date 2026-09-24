@@ -6,8 +6,7 @@ exposed to Python via Pybind11, with an optional pure-JAX backend for device-res
 
 ## Installation
 
-The package is published to PyPI as **`arcascope-senpy`** (the plain `senpy` name is taken by
-an unrelated project). It still imports as `senpy`:
+The package is published to PyPI as **`arcascope-senpy`**. It still imports as `senpy`.
 
 ```bash
 python -m pip install arcascope-senpy
