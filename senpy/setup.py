@@ -21,6 +21,16 @@ version_ns = {}
 with open(os.path.join(ROOT_DIR, "_version.py"), encoding="utf-8") as f:
     exec(f.read(), version_ns)
 
+# PyPI distribution name is "arcascope-senpy" because an unrelated
+# "senpy" project already exists on PyPI. The import package stays "senpy".
+DIST_NAME = 'arcascope-senpy'
+
+long_description = ''
+_readme = os.path.join(ROOT_DIR, '..', 'README.md')
+if os.path.exists(_readme):
+    with open(_readme, encoding='utf-8') as f:
+        long_description = f.read()
+
 # explicit binding file in this directory — must stay as a plain relative string
 # (setuptools rejects absolute paths; os.path.abspath would break in pip's temp build dir)
 PROCESSING_SRC = '../src/sensor_processing_native.cpp'
@@ -119,11 +129,28 @@ ext_modules = [
 ]
 
 setup(
-    name='senpy',
+    name=DIST_NAME,
     version=version_ns["__version__"],
     author='Eric Canton and Franco Tavella',
     description='Fast sensor processing with FFT-based signal analysis',
-    long_description='',
+    long_description=long_description,
+    long_description_content_type='text/markdown',
+    url='https://github.com/Arcascope/sensor_preprocessing_cpp',
+    project_urls={
+        'Homepage': 'https://github.com/Arcascope/sensor_preprocessing_cpp',
+        'Source': 'https://github.com/Arcascope/sensor_preprocessing_cpp',
+        'Issues': 'https://github.com/Arcascope/sensor_preprocessing_cpp/issues',
+    },
+    classifiers=[
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        'Programming Language :: C++',
+        'Operating System :: POSIX :: Linux',
+        'Operating System :: MacOS',
+        'Topic :: Scientific/Engineering',
+    ],
+    keywords='sensor processing fft nufft signal accelerometer',
     ext_modules=ext_modules,
     packages=['senpy'],  # Define senpy as a package
     package_dir={'senpy': '.'},  # The senpy package is in the current directory

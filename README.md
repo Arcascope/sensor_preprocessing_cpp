@@ -10,12 +10,25 @@ In addition to the Dart API, the library also provides a Python package called `
 
 ### Precompiled Python wheels
 
+The package is published to PyPI as **`arcascope-senpy`** (the plain `senpy` name is taken by
+an unrelated project). It still imports as `senpy`:
+
+```bash
+python -m pip install arcascope-senpy
+python -m pip install 'arcascope-senpy[jax]'
+```
+
 GitHub release wheels are built by `.github/workflows/release-wheel.yml` and attached to a release when it is published. The same workflow can be run manually to backfill an existing tag/release, such as `v1.0.0` or `v2.0.0`.
+
+To rehearse the trusted-publishing flow without touching PyPI, run the
+`.github/workflows/dry-run-testpypi.yml` workflow (Actions -> Dry run publish to TestPyPI). It
+builds and publishes the wheel to TestPyPI, which requires a separate pending publisher
+configured with the `testpypi` environment.
 
 Use the release asset URL directly when installing a precompiled wheel:
 
 ```bash
-python -m pip install https://github.com/<owner>/<repo>/releases/download/v2.0.0/senpy-2.0.0-cp311-cp311-linux_x86_64.whl
+python -m pip install https://github.com/<owner>/<repo>/releases/download/v4.0.0/arcascope_senpy-4.0.0-cp311-cp311-manylinux_2_35_x86_64.whl
 ```
 
 `pip install git+https://github.com/<owner>/<repo>.git@v2.0.0` installs from source and will still compile the native extension locally.
