@@ -276,4 +276,4 @@ def test_removed_nufft_alias_and_uniform_compatibility_alias_warns():
 
 
 def test_version_is_consolidated():
-    assert senpy.__version__ == sp.__version__ == "4.0.0"
+    assert senpy.__version__ == sp.__version__ == "4.0.1"
