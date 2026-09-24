@@ -1,14 +1,10 @@
-# Sensor Preprocessing C++ Library
+# senpy
 
-This library provides a set of C++ classes and functions for preprocessing sensor data. We split it out as a separate code base to enable reuse across multiple projects. Include this as a git submodule in your project to take advantage of its functionality.
+`senpy` is a high-performance C++ library with Python bindings for preprocessing sensor data,
+particularly accelerometer data for extracting physiological features. The native routines are
+exposed to Python via Pybind11, with an optional pure-JAX backend for device-resident NUFFT work.
 
-## Dart API
-The library exposes a Dart API through FFI (Foreign Function Interface). This allows Dart applications to call the C++ functions for sensor data preprocessing seamlessly.
-
-## Python API
-In addition to the Dart API, the library also provides a Python package called `senpy` that provides acces to the C++ routines via Pybind11.
-
-### Precompiled Python wheels
+## Installation
 
 The package is published to PyPI as **`arcascope-senpy`** (the plain `senpy` name is taken by
 an unrelated project). It still imports as `senpy`:
@@ -18,22 +14,22 @@ python -m pip install arcascope-senpy
 python -m pip install 'arcascope-senpy[jax]'
 ```
 
-GitHub release wheels are built by `.github/workflows/release-wheel.yml` and attached to a release when it is published. The same workflow can be run manually to backfill an existing tag/release, such as `v1.0.0` or `v2.0.0`.
-
-To rehearse the trusted-publishing flow without touching PyPI, run the
-`.github/workflows/dry-run-testpypi.yml` workflow (Actions -> Dry run publish to TestPyPI). It
-builds and publishes the wheel to TestPyPI, which requires a separate pending publisher
-configured with the `testpypi` environment.
-
-Use the release asset URL directly when installing a precompiled wheel:
+To install a specific precompiled wheel from a GitHub release instead:
 
 ```bash
-python -m pip install https://github.com/<owner>/<repo>/releases/download/v4.0.0/arcascope_senpy-4.0.0-cp311-cp311-manylinux_2_35_x86_64.whl
+python -m pip install https://github.com/Arcascope/sensor_preprocessing_cpp/releases/download/4.0.1/arcascope_senpy-4.0.1-cp312-cp312-manylinux_2_34_x86_64.whl
 ```
 
-`pip install git+https://github.com/<owner>/<repo>.git@v2.0.0` installs from source and will still compile the native extension locally.
+Installing from source, `pip install git+https://github.com/Arcascope/sensor_preprocessing_cpp.git@4.0.1`,
+compiles the native extension locally and requires a C++17 toolchain, CMake, and pybind11.
 
-### Streaming NUSTFT
+Release wheels are built by `.github/workflows/release-wheel.yml` (attached to a published
+release, or run manually to backfill a tag) and published to PyPI via OpenID Connect trusted
+publishing. To rehearse that flow without touching PyPI, run `.github/workflows/dry-run-testpypi.yml`
+(Actions -> Dry run publish to TestPyPI), which requires a separate pending publisher configured
+with the `testpypi` environment.
+
+## Streaming NUSTFT
 
 `compute_nustft` needs the whole recording in memory. `StreamingNUSTFT` computes the **same
 coefficients** from a live stream: push samples as they arrive, get each window back as soon as
@@ -56,7 +52,7 @@ It is exact, not an approximation. Against `compute_nustft` on the same samples 
 agree to ~1e-13 relative (`tests/test_streaming_nustft.py`), for any chunking of the input and
 with or without window overlap.
 
-#### Why it is exact
+### Why it is exact
 
 The transform is linear in the data and the subwindows partition the window, so
 
@@ -93,7 +89,7 @@ $$\sum_j h(\tau_j)^2 \;=\; 0.375\,N - 0.5\,\mathrm{Re}\,\mathrm{ones}(1) + 0.125
 
 with no second pass over the samples.
 
-#### Cost
+### Cost
 
 Each sample is touched once, at `O(bins)`, however many windows it belongs to — so overlap is
 nearly free, unlike the batch transform which re-spreads every sample per window. Memory is one
@@ -101,7 +97,7 @@ accumulator per open window plus the subwindows in flight; it does not grow with
 recording length. A narrow `fmax` is what makes the per-sample constant small: 100 Hz into a 5 Hz
 band at 30 s windows costs about 150 000 multiply-accumulates per second of stream.
 
-#### Contract and differences from `compute_nustft`
+### Contract and differences from `compute_nustft`
 
 * **Ordering.** Timestamps must be non-decreasing over the object's life. A sample belonging to a
   subwindow the stream has already passed cannot be folded in; `dropped_samples` counts those.
@@ -124,7 +120,7 @@ band at 30 s windows costs about 150 000 multiply-accumulates per second of stre
   which is a ~1e-5 relative phase error at the top of a 5 Hz band. Pass times relative to a recent
   origin when sub-microsecond timing matters.
 
-#### Where this came from
+### Where this came from
 
 The recombination identity and its resolution argument are developed in
 `autofish-jax/mobile/litert_spike/stft_recombination.tex`. The first production user is
@@ -132,18 +128,16 @@ FoundryWhoopAndroid, which computes 30 s sleep-staging features one strap packet
 because it deletes the raw samples after upload; its Kotlin implementation and this one agree to
 float32 storage precision on the same fixture.
 
-### JAX NUFFT (CPU / CUDA / Metal)
+## JAX NUFFT (CPU / CUDA / Metal)
 
 The regular `senpy` API remains NumPy/C++ based. For a JAX-native NUFFT that
 keeps sample arrays on the active JAX device, install the `jax` extra:
 
-Run these from this repository's `senpy/` directory:
-
 ```bash
 # CPU-only:
-python -m pip install '.[jax]'
+python -m pip install 'arcascope-senpy[jax]'
 # GPU (CUDA):
-python -m pip install '.[jax]' 'jax[cuda12]'
+python -m pip install 'arcascope-senpy[jax]' 'jax[cuda12]'
 ```
 
 ```python
