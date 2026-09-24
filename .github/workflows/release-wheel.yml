@@ -60,12 +60,12 @@ jobs:
           echo "python-version=$python_version" >> "$GITHUB_OUTPUT"
 
       - name: Check out release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.release.outputs.tag }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ steps.release.outputs.python-version }}
           cache: pip
@@ -122,7 +122,7 @@ jobs:
         run: gh release upload "$TAG" dist/*.whl --clobber
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pypi-wheel
           path: dist/*.whl
@@ -141,7 +141,7 @@ jobs:
       id-token: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
