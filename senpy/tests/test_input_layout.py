@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 import senpy
+from senpy import api as sp
 
 FS = 32.0
 
@@ -45,3 +46,16 @@ def test_float32_signal_is_converted_not_misread(columns):
     want = senpy.compute_nustft(t, x.astype(np.float32).astype(np.float64), 10.0, 8.0, empty_windows="keep")
 
     np.testing.assert_array_equal(got.coefficients, want.coefficients)
+
+
+def test_microsecond_wrappers_take_strided_int64_but_refuse_floats(columns):
+    t_us = np.column_stack([np.round(columns[:, 0] * 1e6).astype(np.int64)] * 2)[:, 0]
+    x = columns[:, 1]
+    assert not t_us.flags.c_contiguous
+
+    strided = sp.compute_jerk_microseconds(t_us, x, x, x, True)
+    contiguous = sp.compute_jerk_microseconds(np.ascontiguousarray(t_us), x, x, x, True)
+    np.testing.assert_array_equal(strided.jerk, contiguous.jerk)
+    # Float timestamps would be truncated to whole microseconds; they are refused instead.
+    with pytest.raises(TypeError):
+        sp.compute_jerk_microseconds(columns[:, 0] * 1e6 + 0.5, x, x, x, True)

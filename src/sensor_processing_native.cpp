@@ -2092,16 +2092,15 @@ void free_motion_features_cpp(MotionFeaturesResult *ptr)
 
 namespace py = pybind11;
 
-// Every array argument is declared c_style | forcecast: the wrappers read request().ptr as a
-// dense buffer, so pybind11 must hand them one. A strided view (a column of an [N, C] array)
-// or a non-float64 dtype is copied into a contiguous float64 array on the way in, rather than
-// being read with the wrong stride.
-
-namespace py = pybind11;
+// Every array argument is declared c_style: the wrappers read request().ptr as a dense buffer,
+// so pybind11 must hand them one, copying a strided view (a column of an [N, C] array) rather
+// than letting it be read with the wrong stride. Float arguments also take forcecast, so any
+// real dtype converts to float64. Integer timestamps do not: only safe casts are allowed, and
+// float timestamps are refused rather than silently truncated to whole microseconds.
 
 // Wrapper functions to convert between NumPy arrays and std::vector
 py::dict resampleAccelerometer_wrapper(
-    py::array_t<int64_t, py::array::c_style | py::array::forcecast> timestamps,
+    py::array_t<int64_t, py::array::c_style> timestamps,
     py::array_t<double, py::array::c_style | py::array::forcecast> x,
     py::array_t<double, py::array::c_style | py::array::forcecast> y,
     py::array_t<double, py::array::c_style | py::array::forcecast> z,
@@ -2151,7 +2150,7 @@ py::dict resampleAccelerometer_wrapper(
 }
 
 py::dict resampleAccelerometerCubic_wrapper(
-    py::array_t<int64_t, py::array::c_style | py::array::forcecast> timestamps,
+    py::array_t<int64_t, py::array::c_style> timestamps,
     py::array_t<double, py::array::c_style | py::array::forcecast> x,
     py::array_t<double, py::array::c_style | py::array::forcecast> y,
     py::array_t<double, py::array::c_style | py::array::forcecast> z,
@@ -2201,7 +2200,7 @@ py::dict resampleAccelerometerCubic_wrapper(
 }
 
 py::dict computeJerk_wrapper(
-    py::array_t<int64_t, py::array::c_style | py::array::forcecast> timestamps,
+    py::array_t<int64_t, py::array::c_style> timestamps,
     py::array_t<double, py::array::c_style | py::array::forcecast> x,
     py::array_t<double, py::array::c_style | py::array::forcecast> y,
     py::array_t<double, py::array::c_style | py::array::forcecast> z,
