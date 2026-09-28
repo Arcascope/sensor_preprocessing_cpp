@@ -45,7 +45,11 @@ target_include_directories(_core PRIVATE ${CPP_DIR})
 target_include_directories(_core PRIVATE ${FINUFFT_INCLUDE_DIR})
 
 # Link against required libraries
-target_link_libraries(_core PRIVATE ${FINUFFT_LIB} ${FFTW3_LIB} ${FFTW3F_LIB} m gomp)
+find_package(OpenMP REQUIRED)
+target_link_libraries(_core PRIVATE ${FINUFFT_LIB} ${FFTW3_LIB} ${FFTW3F_LIB} OpenMP::OpenMP_CXX)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(_core PRIVATE m)
+endif()
 
 # Set RPATH for the module
 set_target_properties(_core PROPERTIES

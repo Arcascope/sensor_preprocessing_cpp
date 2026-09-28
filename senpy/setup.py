@@ -57,6 +57,41 @@ finufft_lib_so = os.path.join(finufft_lib_dir, f"libfinufft.{_lib_ext}")
 fftw3_lib = os.path.join(BUILD_DIR, "_deps/fftw3-build/libfftw3.a")
 fftw3f_lib = os.path.join(BUILD_DIR, "_deps/fftw3f-build/libfftw3f.a")
 
+
+def find_libomp_prefix():
+    """Return the macOS libomp prefix without relying on shell flags."""
+    if platform.system() != "Darwin":
+        return None
+    configured = os.environ.get("LIBOMP_PREFIX")
+    if configured:
+        prefix = configured
+    else:
+        brew = shutil.which("brew")
+        if brew is None:
+            raise RuntimeError(
+                "Building senpy on macOS requires libomp. Install it with "
+                "'brew install libomp', or set LIBOMP_PREFIX to its install prefix."
+            )
+        try:
+            prefix = subprocess.check_output(
+                [brew, "--prefix", "libomp"], text=True
+            ).strip()
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "Homebrew could not locate libomp. Install it with "
+                "'brew install libomp', or set LIBOMP_PREFIX to its install prefix."
+            ) from exc
+    library = os.path.join(prefix, "lib", "libomp.dylib")
+    if not os.path.exists(library):
+        raise RuntimeError(
+            f"libomp was not found at {library}. Install it with "
+            "'brew install libomp', or correct LIBOMP_PREFIX."
+        )
+    return prefix
+
+
+LIBOMP_PREFIX = find_libomp_prefix()
+
 def required_artifacts():
     return [finufft_include_dir, finufft_lib_so, fftw3_lib, fftw3f_lib]
 
@@ -111,6 +146,21 @@ class SenpyBuildExt(build_ext):
 
 include_dirs.append(finufft_include_dir)
 
+extra_link_args = [
+    f'-L{finufft_lib_dir}',
+    '-lfinufft',
+    fftw3_lib, fftw3f_lib,
+    '-Wl,-rpath,@loader_path' if platform.system() == 'Darwin' else '-Wl,-rpath,$ORIGIN',
+]
+if LIBOMP_PREFIX is not None:
+    extra_link_args.extend([
+        f'-L{os.path.join(LIBOMP_PREFIX, "lib")}',
+        f'-Wl,-rpath,{os.path.join(LIBOMP_PREFIX, "lib")}',
+        '-lomp',
+    ])
+else:
+    extra_link_args.append('-lgomp')
+
 ext_modules = [
     Extension(
         'senpy._core',  # Full module path - creates senpy/_core.so
@@ -118,13 +168,7 @@ ext_modules = [
         include_dirs=include_dirs,
         language='c++',
         extra_compile_args=['-std=c++17', '-O3', '-march=x86-64-v3' if os.environ.get('CI') == 'true' else '-march=native', '-DPYTHON'],
-        extra_link_args=[
-            f'-L{finufft_lib_dir}',
-            '-lfinufft',
-            fftw3_lib, fftw3f_lib,
-            '-Wl,-rpath,@loader_path' if platform.system() == 'Darwin' else '-Wl,-rpath,$ORIGIN',
-            '-lomp' if platform.system() == 'Darwin' else '-lgomp',
-        ],
+        extra_link_args=extra_link_args,
     ),
 ]
 

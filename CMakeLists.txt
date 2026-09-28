@@ -37,14 +37,20 @@ endif()
 # Flags must be semicolon-separated CMake lists, not space-separated strings,
 # so that each flag is passed as a separate argument to the compiler.
 if(APPLE)
-    # Only use Homebrew-specific hints if Homebrew is available.
-    find_program(HOMEBREW_EXECUTABLE brew)
-    if(HOMEBREW_EXECUTABLE)
+    if(DEFINED ENV{LIBOMP_PREFIX})
+        set(LIBOMP_PREFIX "$ENV{LIBOMP_PREFIX}")
+    else()
+        # Only use Homebrew-specific hints if Homebrew is available.
+        find_program(HOMEBREW_EXECUTABLE brew)
+    endif()
+    if(NOT LIBOMP_PREFIX AND HOMEBREW_EXECUTABLE)
         execute_process(
             COMMAND "${HOMEBREW_EXECUTABLE}" --prefix libomp
             OUTPUT_VARIABLE LIBOMP_PREFIX
             OUTPUT_STRIP_TRAILING_WHITESPACE
         )
+    endif()
+    if(LIBOMP_PREFIX)
         set(OpenMP_C_FLAGS "-Xpreprocessor;-fopenmp;-I${LIBOMP_PREFIX}/include")
         set(OpenMP_CXX_FLAGS "-Xpreprocessor;-fopenmp;-I${LIBOMP_PREFIX}/include")
         set(OpenMP_C_LIB_NAMES "omp")
