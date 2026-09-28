@@ -86,9 +86,10 @@ def test_host_epoch_timestamps_survive_the_device_float32_downcast(monkeypatch):
 
 
 def test_host_centering_preserves_sample_spacing_exactly():
-    t, gap = senpy_jax._to_centered_seconds(_HostJax(), np, _EPOCH_MS, "ms")
+    t, gap, origin = senpy_jax._to_centered_seconds(_HostJax(), np, _EPOCH_MS, "ms")
 
     assert gap == 0.0
+    assert origin == _EPOCH_MS[0] * 1e-3
     assert np.allclose(np.diff(t), 0.02, rtol=0.0, atol=1e-9)
 
 

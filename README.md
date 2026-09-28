@@ -31,6 +31,54 @@ publishing. To rehearse that flow without touching PyPI, run `.github/workflows/
 (Actions -> Dry run publish to TestPyPI), which requires a separate pending publisher configured
 with the `testpypi` environment.
 
+## The NUSTFT window grid
+
+Every NUSTFT entry point -- `compute_nustft`, `compute_nufft_spectrogram`,
+`compute_nufft_welch`, `compute_stacked_spectrograms`, `compute_nustft_streaming`,
+the `senpy.jax_backend` transforms, and `pack_nustft_window_batches` -- uses one
+window grid, and they all put the same samples in the same windows:
+
+* Window `k` spans `[origin + k*hop, origin + k*hop + window_s)`, with `hop = window_s - overlap_s`.
+  Starts are `k*hop`, never an accumulated sum. Samples before the origin belong to no window.
+* The grid runs while a window ends no later than one median sample period past the last sample.
+* `times` are window centres, `k*hop + window_s/2`, measured from the origin.
+
+`senpy.window_grid(timestamps, window_s, overlap_s, origin_s=..., min_samples=...)` returns that
+grid -- the origin, each window's first/stop sample index, and its sample count -- without
+transforming anything.
+
+**Where window 0 starts** (`origin_s`):
+
+| `origin_s` | Window 0 starts at |
+|---|---|
+| `None` (default) | the first sample, as in every earlier release |
+| a number | that absolute time, in seconds on the timestamps' clock -- for example the start of a reference recording such as PSG, so windows line up with its epochs |
+| `"unix"` | the first whole multiple of the hop since the Unix epoch at or after the first sample, so windows from separate recordings and sessions share one grid; the timestamps must be Unix time |
+
+**Windows with too little data** (`empty_windows`, `min_samples`). A window holding fewer than
+`min_samples` samples (default 4) is not transformed. With `empty_windows="drop"` it is left out,
+so `times` has gaps. With `empty_windows="keep"` every window on the grid gets a row, and the rows
+without enough data hold NaN.
+
+Every result carries per-row metadata, whichever mode is used:
+
+* `window_index` -- the row's index on the grid, so gaps in drop mode are explicit;
+* `sample_count` -- samples in the row's window;
+* `valid` -- `sample_count >= min_samples`; False exactly where a keep-mode row is NaN;
+* `origin_s` -- the absolute start of window 0 that `times` are measured from.
+
+```python
+result = senpy.compute_nustft(t, x, window_s=10.0, overlap_s=8.0, empty_windows="keep")
+result.coefficients[~result.valid]   # all NaN: dropouts, visible on the grid
+```
+
+> **Deprecation notice.** `empty_windows` defaults to `"drop"` in 4.x, matching earlier releases,
+> and omitting it raises a `FutureWarning`. **senpy 5.0 will change the default to `"keep"`.**
+> New code should pass `empty_windows="keep"`; pass `"drop"` explicitly to keep today's output.
+
+Timestamps are measured from the origin once, in the input's own unit, before scaling to
+seconds, so Unix microsecond timestamps (~1.7e15) keep their full precision.
+
 ## JAX NUFFT (CPU / CUDA / Metal)
 
 The regular `senpy` API remains NumPy/C++ based. For a JAX-native NUFFT that
@@ -98,9 +146,12 @@ for batch in batches:
 ```
 
 `recording_indices`, `window_indices`, and `times` in each batch map valid
-output rows back to the input order. Batch sizes remain a hardware-specific
-throughput setting: measure with `block_until_ready()` and a CUDA profiler
-before claiming GPU saturation.
+output rows back to the input order. `window_indices` are grid indices, and
+only windows with at least `min_samples` samples are packed; call
+`senpy.window_grid` with the same arguments (`origin_s` accepts one origin or
+one per recording) for the full grid and its sample counts. Batch sizes remain
+a hardware-specific throughput setting: measure with `block_until_ready()` and
+a CUDA profiler before claiming GPU saturation.
 
 ## Streaming NUSTFT
 
@@ -153,7 +204,12 @@ band at 30 s windows costs about 150 000 multiply-accumulates per second of stre
   subwindow the stream has already passed cannot be folded in; `dropped_samples` counts those.
 * **Window grid.** `origin_s` anchors it, and window 0 is the earliest — nothing before the origin
   is reported. Pass the first timestamp to reproduce `compute_nustft`'s alignment, or a fixed
-  epoch to keep window indices meaningful across sessions and processes.
+  epoch to keep window indices meaningful across sessions and processes: with Unix timestamps,
+  `origin_s=0.0` puts windows on the grid `compute_nustft(..., origin_s="unix")` uses.
+* **Sparse windows.** A window with fewer than `min_samples` samples is not reported, and neither
+  is one the stream saw no samples in at all; both show up as gaps in `index`. `skipped_windows`
+  counts the first kind. For a dense grid over a whole array, use `compute_nustft_streaming(...,
+  empty_windows="keep")`.
 * **Divisibility.** The window and the hop must be whole multiples of `subwindow_s`, so that no
   subwindow straddles a window edge; one that did could not be shared by the windows either side.
 * **Sample rate.** Supplied rather than measured: it sets the magnitude scale and the grid size.

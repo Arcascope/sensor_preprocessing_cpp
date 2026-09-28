@@ -27,13 +27,17 @@ struct SpectrogramResult
     std::vector<double> freqs;            // Hz
     std::vector<double> times;            // Relative time in seconds
     std::vector<std::vector<double>> Sxx; // [times x frequencies]
+    std::vector<std::int64_t> window_indices;     // NUFFT only: grid index of each row
+    std::vector<std::int64_t> grid_sample_counts; // NUFFT only: samples in every grid window
 };
 
 struct NUSTFTResult
 {
     std::vector<double> freqs;                                     // Hz
-    std::vector<double> times;                                     // Relative time in seconds
+    std::vector<double> times;                                     // Window centres, seconds after the origin
     std::vector<std::vector<std::complex<double>>> coefficients;   // [times x frequencies]
+    std::vector<std::int64_t> window_indices;                      // Grid index of each row
+    std::vector<std::int64_t> grid_sample_counts;                  // Samples in every grid window, reported or not
 };
 
 struct MotionFeaturesResult
@@ -309,13 +313,21 @@ public:
     // Bypasses resampling to avoid spectral artifacts in the 0-10 Hz band
     // secperseg and secoverlap are in seconds (not samples)
     // target_fs: if > 0, resample output to fixed freq grid (fmax = target_fs/2, spacing = 1/secperseg)
+    //
+    // Window k spans [origin + k*hop, origin + k*hop + secperseg). origin defaults (NaN) to the
+    // first timestamp; samples before it belong to no window. Starts are k*hop, never an
+    // accumulated sum, so senpy/_grid.py, the streaming transform and the JAX backend place every
+    // sample in the same window. Windows with fewer than min_samples samples are not transformed;
+    // grid_sample_counts still reports them, so callers can rebuild the full grid.
     static NUSTFTResult computeNUSTFT(
         const std::vector<double> &timestamps,
         const std::vector<double> &signal,
         double secperseg,
         double secoverlap,
         double target_fs = 0.0,
-        bool detrend = true)
+        bool detrend = true,
+        double origin = std::numeric_limits<double>::quiet_NaN(),
+        int min_samples = 4)
     {
         if (timestamps.size() != signal.size())
             throw std::runtime_error("timestamps and signal must have the same length");
@@ -331,6 +343,14 @@ public:
 
         if (target_fs < 0.0)
             throw std::runtime_error("target_fs must be >= 0");
+
+        if (min_samples < 1)
+            throw std::runtime_error("min_samples must be >= 1");
+
+        if (std::isnan(origin))
+            origin = timestamps[0];
+        if (!std::isfinite(origin))
+            throw std::runtime_error("origin must be finite");
 
         // Estimate median sampling rate
         std::vector<double> diffs;
@@ -378,28 +398,28 @@ public:
         // Prepare output
         std::vector<double> window_centres;
         std::vector<std::vector<std::complex<double>>> spectra;
+        std::vector<std::int64_t> window_indices;
+        std::vector<std::int64_t> grid_sample_counts;
 
-        double t_start = timestamps[0];
-        double t_end = timestamps[timestamps.size() - 1];
+        const size_t n = timestamps.size();
+        // Timestamps relative to the origin, computed exactly as senpy/_grid.py does.
+        std::vector<double> t_rel(n);
+        for (size_t i = 0; i < n; ++i)
+            t_rel[i] = timestamps[i] - origin;
+        const double limit = t_rel[n - 1] + dt_median;
 
-        // Sliding window loop
-        double win_start = t_start;
         // Use two-pointer indices to avoid rescanning timestamps for every window
         size_t start_idx = 0;
         size_t end_idx = 0;
-        const size_t n = timestamps.size();
-        while (win_start + win_dur <= t_end + dt_median)
+        for (std::int64_t w = 0;; ++w)
         {
-            if (start_idx >= n)
-            {
-                // No more samples available for subsequent windows
+            const double win_start = static_cast<double>(w) * hop_dur;
+            const double win_end = win_start + win_dur;
+            if (!(win_end <= limit))
                 break;
-            }
-
-            double win_end = win_start + win_dur;
 
             // Advance start_idx to the first sample >= win_start
-            while (start_idx < n && timestamps[start_idx] < win_start)
+            while (start_idx < n && t_rel[start_idx] < win_start)
             {
                 ++start_idx;
             }
@@ -409,26 +429,25 @@ public:
             {
                 end_idx = start_idx;
             }
-            while (end_idx < n && timestamps[end_idx] < win_end)
+            while (end_idx < n && t_rel[end_idx] < win_end)
             {
                 ++end_idx;
             }
 
+            grid_sample_counts.push_back(static_cast<std::int64_t>(end_idx - start_idx));
+
+            // Too few samples: leave the window out, but it stays counted on the grid.
+            if (end_idx - start_idx < static_cast<size_t>(min_samples))
+                continue;
+
             // Select samples in window [start_idx, end_idx)
             std::vector<double> t_win, s_win;
-            t_win.reserve(end_idx > start_idx ? (end_idx - start_idx) : 0);
-            s_win.reserve(end_idx > start_idx ? (end_idx - start_idx) : 0);
+            t_win.reserve(end_idx - start_idx);
+            s_win.reserve(end_idx - start_idx);
             for (size_t i = start_idx; i < end_idx; ++i)
             {
-                t_win.push_back(timestamps[i]);
+                t_win.push_back(t_rel[i]);
                 s_win.push_back(signal[i]);
-            }
-
-            if (t_win.size() < 4)
-            {
-                // Skip windows with too few samples
-                win_start += hop_dur;
-                continue;
             }
 
             // Compute tau and Hann window
@@ -511,29 +530,20 @@ public:
 
             spectra.push_back(coeffs);
             window_centres.push_back(win_start + win_dur / 2.0);
-
-            win_start += hop_dur;
+            window_indices.push_back(w);
         }
 
         // Build result
         NUSTFTResult result;
         result.freqs = freqs;
+        result.times = std::move(window_centres);
+        result.coefficients = std::move(spectra);
+        result.window_indices = std::move(window_indices);
+        result.grid_sample_counts = std::move(grid_sample_counts);
 
-        if (spectra.empty())
-        {
-            result.times.clear();
-            result.coefficients.clear();
-        }
-        else
-        {
-            result.times.resize(window_centres.size());
-            for (size_t i = 0; i < window_centres.size(); ++i)
-                result.times[i] = window_centres[i] - t_start;
-            result.coefficients = std::move(spectra);
-        }
-
-        // If target_fs is specified, resample to a common frequency grid via cubic spline
-        if (target_fs > 0.0 && !result.coefficients.empty())
+        // If target_fs is specified, resample to a common frequency grid via cubic spline. The
+        // grid is reported even when no window had data, so it does not depend on the data.
+        if (target_fs > 0.0)
         {
             double fmax = target_fs / 2.0;
             double freq_spacing = 1.0 / secperseg;
@@ -585,9 +595,11 @@ public:
         double secoverlap,
         double target_fs = 0.0,
         const std::string &kind = "magnitude",
-        bool detrend = true)
+        bool detrend = true,
+        double origin = std::numeric_limits<double>::quiet_NaN(),
+        int min_samples = 4)
     {
-        auto stft = computeNUSTFT(timestamps, signal, secperseg, secoverlap, target_fs, detrend);
+        auto stft = computeNUSTFT(timestamps, signal, secperseg, secoverlap, target_fs, detrend, origin, min_samples);
         std::string normalized_kind = kind;
         std::replace(normalized_kind.begin(), normalized_kind.end(), '-', '_');
         std::transform(normalized_kind.begin(), normalized_kind.end(), normalized_kind.begin(),
@@ -600,6 +612,8 @@ public:
         SpectrogramResult result;
         result.freqs = std::move(stft.freqs);
         result.times = std::move(stft.times);
+        result.window_indices = std::move(stft.window_indices);
+        result.grid_sample_counts = std::move(stft.grid_sample_counts);
         result.Sxx.assign(stft.coefficients.size(), std::vector<double>());
         for (size_t t = 0; t < stft.coefficients.size(); ++t)
         {
@@ -1559,13 +1573,15 @@ public:
         double sample_rate,
         double fmax = 0.0,
         double origin = 0.0,
-        bool detrend = true)
+        bool detrend = true,
+        int min_samples = 4)
         : win_dur_(secperseg),
           hop_dur_(secperseg - secoverlap),
           sub_dur_(secpersub),
           sample_rate_(sample_rate),
           origin_(origin),
-          detrend_(detrend)
+          detrend_(detrend),
+          min_samples_(min_samples)
     {
         if (!(secperseg > 0.0))
             throw std::runtime_error("secperseg must be > 0");
@@ -1577,6 +1593,8 @@ public:
             throw std::runtime_error("sample_rate must be > 0");
         if (fmax < 0.0)
             throw std::runtime_error("fmax must be >= 0");
+        if (min_samples < 1)
+            throw std::runtime_error("min_samples must be >= 1");
 
         subs_per_window_ = wholeMultiple(win_dur_, sub_dur_, "secperseg");
         subs_per_hop_ = wholeMultiple(hop_dur_, sub_dur_, "the hop (secperseg - secoverlap)");
@@ -1710,8 +1728,9 @@ public:
 
     std::size_t openWindows() const { return open_windows_.size(); }
 
-    // Windows that held fewer than the four samples computeNUSTFT requires, and so were
-    // skipped rather than reported. These are the gaps in the output's time axis.
+    // Windows that held samples, but fewer than min_samples, and so were skipped rather than
+    // reported. Windows that held no samples at all are not counted: the stream never saw them.
+    // Either kind shows up as a gap in the reported window indices.
     std::size_t skippedWindows() const { return skipped_; }
 
 private:
@@ -1836,7 +1855,7 @@ private:
         std::vector<StreamingNUSTFTWindow> &out)
     {
         // computeNUSTFT skips windows this sparse rather than reporting a meaningless spectrum.
-        if (accumulator.count < 4)
+        if (accumulator.count < static_cast<std::size_t>(min_samples_))
         {
             ++skipped_;
             return;
@@ -1889,6 +1908,7 @@ private:
     double sample_rate_;
     double origin_;
     bool detrend_;
+    int min_samples_;
 
     int subs_per_window_ = 0;
     int subs_per_hop_ = 0;
@@ -2294,13 +2314,22 @@ py::dict computeSpectrogram_wrapper(
     return result_dict;
 }
 
+py::array_t<std::int64_t> int64VectorToPython(const std::vector<std::int64_t> &values)
+{
+    py::array_t<std::int64_t> out(static_cast<py::ssize_t>(values.size()));
+    std::copy(values.begin(), values.end(), static_cast<std::int64_t *>(out.request().ptr));
+    return out;
+}
+
 py::dict computeNUSTFT_wrapper(
     py::array_t<double> timestamps,
     py::array_t<double> signal,
     double secperseg,
     double secoverlap,
     double target_fs = 0.0,
-    bool detrend = true)
+    bool detrend = true,
+    double origin = std::numeric_limits<double>::quiet_NaN(),
+    int min_samples = 4)
 {
     auto ts_buf = timestamps.request();
     auto sig_buf = signal.request();
@@ -2315,7 +2344,7 @@ py::dict computeNUSTFT_wrapper(
     std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
                                    static_cast<double *>(sig_buf.ptr) + sig_buf.size);
 
-    auto result = SensorProcessor::computeNUSTFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs, detrend);
+    auto result = SensorProcessor::computeNUSTFT(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs, detrend, origin, min_samples);
 
     py::array_t<double> freqs(result.freqs.size());
     std::copy(result.freqs.begin(), result.freqs.end(),
@@ -2346,6 +2375,8 @@ py::dict computeNUSTFT_wrapper(
     result_dict["freqs"] = freqs;
     result_dict["times"] = times;
     result_dict["coefficients"] = coefficients;
+    result_dict["window_indices"] = int64VectorToPython(result.window_indices);
+    result_dict["grid_sample_counts"] = int64VectorToPython(result.grid_sample_counts);
 
     return result_dict;
 }
@@ -2392,7 +2423,9 @@ py::dict computeNUFFTSpectrogram_wrapper(
     double secoverlap,
     double target_fs = 0.0,
     const std::string &kind = "magnitude",
-    bool detrend = true)
+    bool detrend = true,
+    double origin = std::numeric_limits<double>::quiet_NaN(),
+    int min_samples = 4)
 {
     auto ts_buf = timestamps.request();
     auto sig_buf = signal.request();
@@ -2407,7 +2440,7 @@ py::dict computeNUFFTSpectrogram_wrapper(
     std::vector<double> signal_vec(static_cast<double *>(sig_buf.ptr),
                                    static_cast<double *>(sig_buf.ptr) + sig_buf.size);
 
-    auto result = SensorProcessor::computeNUFFTSpectrogram(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs, kind, detrend);
+    auto result = SensorProcessor::computeNUFFTSpectrogram(timestamps_vec, signal_vec, secperseg, secoverlap, target_fs, kind, detrend, origin, min_samples);
 
     // Convert frequencies to NumPy array
     py::array_t<double> freqs(result.freqs.size());
@@ -2441,6 +2474,8 @@ py::dict computeNUFFTSpectrogram_wrapper(
     result_dict["freqs"] = freqs;
     result_dict["times"] = times;
     result_dict["Sxx"] = Sxx;
+    result_dict["window_indices"] = int64VectorToPython(result.window_indices);
+    result_dict["grid_sample_counts"] = int64VectorToPython(result.grid_sample_counts);
 
     return result_dict;
 }
@@ -2678,8 +2713,8 @@ class StreamingNUSTFTPy
 {
 public:
     StreamingNUSTFTPy(double secperseg, double secoverlap, double secpersub, double sample_rate,
-                      double fmax, double origin, bool detrend)
-        : impl_(secperseg, secoverlap, secpersub, sample_rate, fmax, origin, detrend) {}
+                      double fmax, double origin, bool detrend, int min_samples)
+        : impl_(secperseg, secoverlap, secpersub, sample_rate, fmax, origin, detrend, min_samples) {}
 
     py::list push(py::array_t<double> timestamps, py::array_t<double> signal)
     {
@@ -2763,7 +2798,9 @@ PYBIND11_MODULE(_core, m)
           py::arg("secoverlap"),
           py::arg("target_fs") = 0.0,
           py::arg("kind") = "magnitude",
-          py::arg("detrend") = true);
+          py::arg("detrend") = true,
+          py::arg("origin") = std::numeric_limits<double>::quiet_NaN(),
+          py::arg("min_samples") = 4);
 
     m.def("compute_nustft", &computeNUSTFT_wrapper,
           "Compute complex NUSTFT coefficients from non-uniformly sampled data using finufft",
@@ -2772,19 +2809,22 @@ PYBIND11_MODULE(_core, m)
           py::arg("secperseg"),
           py::arg("secoverlap"),
           py::arg("target_fs") = 0.0,
-          py::arg("detrend") = true);
+          py::arg("detrend") = true,
+          py::arg("origin") = std::numeric_limits<double>::quiet_NaN(),
+          py::arg("min_samples") = 4);
 
     py::class_<StreamingNUSTFTPy>(m, "StreamingNUSTFT",
           "Incremental NUSTFT: push samples, get finished windows back, exactly as if the whole "
           "recording had been passed to compute_nustft at once")
-        .def(py::init<double, double, double, double, double, double, bool>(),
+        .def(py::init<double, double, double, double, double, double, bool, int>(),
              py::arg("secperseg"),
              py::arg("secoverlap"),
              py::arg("secpersub"),
              py::arg("sample_rate"),
              py::arg("fmax") = 0.0,
              py::arg("origin") = 0.0,
-             py::arg("detrend") = true)
+             py::arg("detrend") = true,
+             py::arg("min_samples") = 4)
         .def("push", &StreamingNUSTFTPy::push,
              "Append samples and return every window that closed as a result",
              py::arg("timestamps"),
