@@ -226,14 +226,13 @@ def run_stream(t, signal, bounds, window_s, overlap_s, subwindow_s, fs, fmax,
 def parity_vs_batch(t, signal, windows, transform, reference, window_s, fs, band_limited):
     """Max relative deviation between streamed and batch coefficients.
 
-    `push` reports only windows the stream has passed the end of; the batch
-    transform also emits a final window ending within one sample period of
-    the last timestamp, so that one is taken out of the flush. Windows are
-    matched on center time rather than position -- a dropout empties a
-    window on both paths, but only the batch path renumbers around it.
+    `push` reports only windows the stream has passed the end of; the
+    trailing windows the data stops partway through come out of the flush,
+    as the batch transform reports them. Windows are matched on center time
+    rather than position -- a dropout empties a window on both paths, but
+    only the batch path renumbers around it.
     """
-    limit = float(t[-1]) + 1.0 / fs
-    windows = windows + [w for w in transform.flush() if w.start + window_s <= limit]
+    windows = windows + transform.flush()
 
     by_center = {round(w.center, 6): w for w in windows}
     matched, missing = [], 0
