@@ -157,6 +157,26 @@ for batch in batches:
     real_coefficients = coefficients[batch.row_valid]  # [windows, 3, freqs]
 ```
 
+For whole datasets, `compute_nustft_many` does all of this for you, at device throughput:
+
+```python
+from senpy import jax_backend as senpy_jax
+
+# Each recording is (timestamps[N], samples[N, C]) for any number of channels C.
+results = senpy_jax.compute_nustft_many(
+    recordings, window_s=10.0, overlap_s=8.0, target_fs=12.0, empty_windows="keep"
+)
+coefficients = results[0][2].coefficients   # recording 0, channel 2: a senpy.api.NUSTFTResult
+```
+
+It gathers windows from every recording into large batches (`rows_per_call`, default 8192) with
+vectorized NumPy on `build_threads` host threads that run ahead of the device, keeps up to
+`max_in_flight` batches dispatched, and drops bins above `target_fs / 2` on the device before the
+copy back. Local sample coordinates are computed on the host in float64, so it agrees with the
+C++ transform to ~1e-6 even on long recordings. `benchmarks/bench_nustft_many.py` compares it
+with the packer loop below; on one RTX-class GPU, four 8 h nights × 5 channels took 0.61 s
+against the loop's 1.55 s. Results change with `rows_per_call` only in float32 rounding.
+
 `recording_indices`, `window_indices`, and `times` in each batch map valid
 output rows back to the input order. `window_indices` are grid indices, and
 only windows with at least `min_samples` samples are packed; call

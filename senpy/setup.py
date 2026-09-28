@@ -158,7 +158,7 @@ setup(
     package_dir={'senpy': '.'},  # The senpy package is in the current directory
     package_data={'senpy': ['*.so', '*.dylib', '*.dll']},
     include_package_data=True,
-    py_modules=['senpy', 'senpy.api', 'senpy._grid', 'senpy.jax_backend', 'senpy._version', "senpy._core"],
+    py_modules=['senpy', 'senpy.api', 'senpy._grid', 'senpy._packing', 'senpy.jax_backend', 'senpy._version', "senpy._core"],
     install_requires=['pybind11>=3.0', 'numpy>=1.19.0'],
     extras_require={
         # Just JAX: the NUFFT is pure JAX now, so there is no compiled
