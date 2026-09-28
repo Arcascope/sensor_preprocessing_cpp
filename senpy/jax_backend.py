@@ -27,9 +27,22 @@ from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, DefaultDict, List, Literal, Optional, Sequence, Tuple
+from typing import Any, DefaultDict, List, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
+
+from ._grid import (
+    DEFAULT_MIN_SAMPLES,
+    OriginSpec,
+    grid_from_relative,
+    median_spacing,
+    relative_seconds,
+    resolve_empty_windows,
+    resolve_origin,
+    timestamp_scale,
+    validate_min_samples,
+    window_count,
+)
 
 
 AXIS_ORDER_TIME_FREQUENCY = "time_frequency"
@@ -204,7 +217,12 @@ def _normalize_kind(kind: str) -> str:
 
 @dataclass(frozen=True)
 class JaxSpectrogramResult:
-    """A JAX-backed time-frequency surface with shape ``(time, frequency)``."""
+    """A JAX-backed time-frequency surface with shape ``(time, frequency)``.
+
+    ``window_index``, ``sample_count``, ``valid`` and ``origin_s`` are host
+    NumPy metadata with the meaning they have on
+    :class:`senpy.api.SpectrogramResult`.
+    """
 
     frequencies: Any
     times: Any
@@ -212,6 +230,10 @@ class JaxSpectrogramResult:
     kind: str = "magnitude"
     method: str = "senpy_jax"
     axis_order: str = AXIS_ORDER_TIME_FREQUENCY
+    window_index: Optional[np.ndarray] = None
+    sample_count: Optional[np.ndarray] = None
+    valid: Optional[np.ndarray] = None
+    origin_s: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -220,7 +242,9 @@ class JaxNUSTFTResult:
 
     ``coefficients``, ``frequencies``, and ``times`` stay on the active JAX
     device.  The numerical convention intentionally matches
-    :func:`senpy.api.compute_nustft`.
+    :func:`senpy.api.compute_nustft`, including ``times`` measured from
+    ``origin_s`` and the host NumPy ``window_index``, ``sample_count`` and
+    ``valid`` metadata.
     """
 
     frequencies: Any
@@ -228,6 +252,10 @@ class JaxNUSTFTResult:
     coefficients: Any
     method: str = "senpy_jax"
     axis_order: str = AXIS_ORDER_TIME_FREQUENCY
+    window_index: Optional[np.ndarray] = None
+    sample_count: Optional[np.ndarray] = None
+    valid: Optional[np.ndarray] = None
+    origin_s: Optional[float] = None
 
     @property
     def shape(self) -> Tuple[int, int]:
@@ -260,6 +288,10 @@ class JaxNUSTFTResult:
             times=self.times,
             Sxx=surface,
             kind=kind,
+            window_index=self.window_index,
+            sample_count=self.sample_count,
+            valid=self.valid,
+            origin_s=self.origin_s,
         )
 
     def welch(
@@ -313,11 +345,7 @@ def _next_power_of_two(value: int) -> int:
 
 
 def _timestamp_scale(ts_unit: str) -> float:
-    units = {"s": 1.0, "ms": 1e-3, "us": 1e-6}
-    try:
-        return units[ts_unit]
-    except KeyError as exc:
-        raise ValueError("ts_unit must be one of: 's', 'ms', 'us'") from exc
+    return timestamp_scale(ts_unit)
 
 
 _TIMESTAMP_PRECISION_REMEDY = (
@@ -337,15 +365,26 @@ def _timestamp_precision_hint(timestamp_gap_s: float) -> str:
     )
 
 
-def _to_centered_seconds(jax: Any, jnp: Any, timestamps: Any, ts_unit: str) -> Tuple[Any, float]:
-    """Convert timestamps to seconds relative to the first sample.
+def _to_centered_seconds(
+    jax: Any,
+    jnp: Any,
+    timestamps: Any,
+    ts_unit: str,
+    origin_s: OriginSpec = None,
+    hop_s: float = 1.0,
+) -> Tuple[Any, float, float]:
+    """Convert timestamps to seconds relative to the window grid's origin.
 
-    The CPU API reports times relative to the first sample, and centering is
+    Returns ``(t_relative, gap_s, origin_s)``. With the default origin -- the
+    first sample -- this is the historical centering.
+
+    The CPU API reports times relative to the origin, and centering is
     also what keeps large absolute timestamps representable: without
     ``jax_enable_x64`` JAX materializes float64 host input as float32, whose
     ~1e-7 relative precision cannot resolve millisecond spacing at an epoch
     magnitude of ~1.7e12. Host arrays are therefore centered in float64 by
-    NumPy *before* they reach the device.
+    NumPy *before* they reach the device, by the same
+    :func:`senpy._grid.relative_seconds` the CPU backends use.
 
     Arrays that arrive already on the device cannot be repaired here -- the
     caller chose their dtype and any precision is already lost -- so the second
@@ -357,18 +396,27 @@ def _to_centered_seconds(jax: Any, jnp: Any, timestamps: Any, ts_unit: str) -> T
     scale = _timestamp_scale(ts_unit)
     if isinstance(timestamps, jax.Array):
         if timestamps.size == 0:
-            return timestamps, 0.0
+            return timestamps, 0.0, 0.0
+        first_s = float(jax.device_get(timestamps[0])) * scale
+        origin = resolve_origin(origin_s, first_s, hop_s)
         centered = (timestamps - timestamps[0]) * scale
+        if origin != first_s:
+            centered = centered + (first_s - origin)
         if not jnp.issubdtype(timestamps.dtype, jnp.floating):
-            # Integer timestamps represent every value in range exactly.
-            return centered, 0.0
+            # An integer array holds its values exactly -- but without x64,
+            # jnp.asarray already wrapped int64 epoch values to int32 before
+            # they got here, which cannot be detected. Differences survive the
+            # wrap; the absolute values that origin_s="unix" or a numeric
+            # origin rely on do not. The docstring tells callers to pass NumPy.
+            return centered, 0.0, origin
         magnitude = float(jax.device_get(jnp.max(jnp.abs(timestamps))))
         gap = magnitude * float(jnp.finfo(timestamps.dtype).eps) * scale
-        return centered, gap
+        return centered, gap, origin
     host = np.asarray(timestamps, dtype=np.float64)
-    if host.ndim == 1 and host.size:
-        host = host - host[0]
-    return jnp.asarray(host * scale), 0.0
+    if host.ndim != 1 or host.size == 0:
+        return jnp.asarray(host * scale), 0.0, 0.0
+    relative, origin = relative_seconds(host, ts_unit, origin_s, hop_s)
+    return jnp.asarray(relative), 0.0, origin
 
 
 def _validate_nfft_padded(nfft_padded: int) -> int:
@@ -497,6 +545,8 @@ def pack_nustft_window_batches(
     overlap_s: float,
     batch_size: int,
     ts_unit: str = "s",
+    origin_s: Union[OriginSpec, Sequence[OriginSpec]] = None,
+    min_samples: int = DEFAULT_MIN_SAMPLES,
 ) -> Tuple[PackedNUSTFTWindowBatch, ...]:
     """Pack many timestamped ``[N, 3]`` recordings into static NUFFT batches.
 
@@ -506,6 +556,17 @@ def pack_nustft_window_batches(
     :func:`compute_nustft_window_batch`.  Windows are bucketed by padded FFT
     length and source width.  Their metadata restores recording/window order
     after ``row_valid`` removes the final batch padding.
+
+    Windows follow the grid of :func:`senpy.window_grid`: ``window_indices``
+    are grid indices and ``times`` are centres after each recording's origin.
+    Only windows with at least ``min_samples`` samples are packed; call
+    :func:`senpy.window_grid` with the same arguments for the full grid, its
+    sample counts, and the origin.
+
+    Args:
+        origin_s: One origin for every recording, or one per recording; see
+            :func:`senpy.api.compute_nustft`.
+        min_samples: Fewest samples a window needs to be packed.
     """
     if window_s <= 0.0:
         raise ValueError("window_s must be > 0")
@@ -513,7 +574,16 @@ def pack_nustft_window_batches(
         raise ValueError("overlap_s must satisfy 0 <= overlap_s < window_s")
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
-    scale = _timestamp_scale(ts_unit)
+    min_samples = validate_min_samples(min_samples)
+    _timestamp_scale(ts_unit)
+    recordings = list(recordings)
+    if isinstance(origin_s, (list, tuple, np.ndarray)):
+        origins = list(origin_s)
+        if len(origins) != len(recordings):
+            raise ValueError("origin_s must be a single origin or one per recording")
+    else:
+        origins = [origin_s] * len(recordings)
+    hop_s = window_s - overlap_s
     groups: DefaultDict[Tuple[int, int], List[Tuple[Any, ...]]] = defaultdict(list)
 
     for recording_index, (timestamps, samples) in enumerate(recordings):
@@ -531,40 +601,40 @@ def pack_nustft_window_batches(
             raise ValueError("timestamps must be finite")
         if not np.all(np.isfinite(s)):
             raise ValueError("accelerometer samples must be finite")
-        t = (t - t[0]) * scale
+        t, origin = relative_seconds(t, ts_unit, origins[recording_index], hop_s)
         diffs = np.diff(t)
         if np.any(diffs < 0.0):
             raise ValueError("timestamps must be sorted")
-        positive_diffs = diffs[np.isfinite(diffs) & (diffs > 0.0)]
-        if positive_diffs.size == 0:
-            raise ValueError("timestamps must contain at least one positive time step")
-        median_fs = 1.0 / float(np.sort(positive_diffs)[positive_diffs.size // 2])
+        dt_median = median_spacing(t)
+        median_fs = 1.0 / dt_median
         nfft = int(window_s * median_fs)
         if nfft < 2:
             raise ValueError("window_s is too short for the observed sampling density")
         nfft_padded = _next_power_of_two(nfft)
-        hop_s = window_s - overlap_s
-        start = 0.0
-        window_index = 0
-        while start + window_s <= t[-1] + 1.0 / median_fs:
-            first = int(np.searchsorted(t, start, side="left"))
-            last = int(np.searchsorted(t, start + window_s, side="left"))
-            if last - first >= 4:
-                count = last - first
-                source_width = _next_power_of_two(count)
-                local_points = 2.0 * np.pi * ((t[first:last] - start) / window_s) - np.pi
-                groups[(nfft_padded, source_width)].append(
-                    (
-                        local_points,
-                        np.asarray(s[first:last]),
-                        recording_index,
-                        window_index,
-                        start + window_s / 2.0,
-                        median_fs,
-                    )
+        grid = grid_from_relative(
+            t,
+            origin_s=origin,
+            window_s=float(window_s),
+            hop_s=float(hop_s),
+            dt_median_s=dt_median,
+            min_samples=min_samples,
+        )
+        for window_index in np.flatnonzero(grid.valid).tolist():
+            first = int(grid.first[window_index])
+            last = int(grid.stop[window_index])
+            start = window_index * hop_s
+            source_width = _next_power_of_two(last - first)
+            local_points = 2.0 * np.pi * ((t[first:last] - start) / window_s) - np.pi
+            groups[(nfft_padded, source_width)].append(
+                (
+                    local_points,
+                    np.asarray(s[first:last]),
+                    recording_index,
+                    window_index,
+                    start + window_s / 2.0,
+                    median_fs,
                 )
-            start += hop_s
-            window_index += 1
+            )
 
     packed: List[PackedNUSTFTWindowBatch] = []
     for (nfft_padded, source_width), rows in sorted(groups.items()):
@@ -618,6 +688,10 @@ def compute_nustft(
     target_fs: Optional[float] = None,
     detrend: bool = True,
     eps: float = 1e-6,
+    *,
+    origin_s: OriginSpec = None,
+    empty_windows: Optional[str] = None,
+    min_samples: int = DEFAULT_MIN_SAMPLES,
 ) -> JaxNUSTFTResult:
     """Compute a device-resident non-uniform STFT.
 
@@ -631,7 +705,11 @@ def compute_nustft(
             input is centered on the first sample in float64 before it reaches
             the device, so absolute epoch values are safe without x64. A JAX
             array is used at whatever dtype the caller built it with, and is
-            rejected if that dtype cannot resolve the sample spacing.
+            rejected if a float dtype cannot resolve the sample spacing.
+            Without x64, ``jnp.asarray`` silently wraps int64 epoch values
+            to int32; spacing survives that, but the absolute times an
+            explicit ``origin_s`` or ``"unix"`` depends on do not -- pass
+            NumPy timestamps (or enable x64) when using either.
         signal: One-dimensional JAX-compatible sample values.
         window_s: Window duration in seconds.
         overlap_s: Window overlap in seconds.
@@ -641,7 +719,46 @@ def compute_nustft(
         detrend: Subtract each window mean before applying the Hann taper.
         eps: Requested relative accuracy of the NUFFT. Use ``1e-6`` for typical
             GPU float32 use; enable JAX x64 before importing JAX for float64.
+        origin_s, empty_windows, min_samples: As in
+            :func:`senpy.api.compute_nustft`; the windows are the same ones.
+            With ``empty_windows="keep"`` rows without enough samples hold NaN.
+
+    Unlike the CPU API, which raises ``ValueError`` when there is nothing to
+    report -- no window on the grid, or none with enough samples in
+    ``"drop"`` mode -- this returns a result with zero rows, as it always has.
+    senpy 5.0 will make it raise like the CPU API.
     """
+    empty_windows = resolve_empty_windows(empty_windows)
+    return _compute_nustft(
+        timestamps,
+        signal,
+        window_s,
+        overlap_s,
+        ts_unit=ts_unit,
+        target_fs=target_fs,
+        detrend=detrend,
+        eps=eps,
+        origin_s=origin_s,
+        empty_windows=empty_windows,
+        min_samples=min_samples,
+    )
+
+
+def _compute_nustft(
+    timestamps: Any,
+    signal: Any,
+    window_s: float,
+    overlap_s: float,
+    *,
+    ts_unit: str,
+    target_fs: Optional[float],
+    detrend: bool,
+    eps: float,
+    origin_s: OriginSpec,
+    empty_windows: str,
+    min_samples: int,
+) -> JaxNUSTFTResult:
+    min_samples = validate_min_samples(min_samples)
     if not window_s > 0.0:
         raise ValueError("window_s must be > 0")
     if overlap_s < 0.0 or overlap_s >= window_s:
@@ -652,7 +769,10 @@ def compute_nustft(
         raise ValueError("eps must be > 0")
 
     jax, jnp = _dependencies()
-    t, timestamp_gap_s = _to_centered_seconds(jax, jnp, timestamps, ts_unit)
+    hop_s = window_s - overlap_s
+    t, timestamp_gap_s, origin = _to_centered_seconds(
+        jax, jnp, timestamps, ts_unit, origin_s, hop_s
+    )
     s = jnp.asarray(signal)
     if t.ndim != 1 or s.ndim != 1:
         raise ValueError("timestamps and signal must be one-dimensional")
@@ -660,6 +780,13 @@ def compute_nustft(
         raise ValueError("timestamps and signal must have the same shape")
     if t.size < 2:
         raise ValueError("compute_nustft requires at least two timestamps")
+
+    # Host timestamps are also kept in float64 on the host, so the window grid
+    # -- which samples fall in which window -- is found exactly as the CPU
+    # backends find it, not from the device copy (float32 without x64).
+    host_t = None
+    if not isinstance(timestamps, jax.Array):
+        host_t, _ = relative_seconds(timestamps, ts_unit, origin, hop_s)
 
     # Match the CPU implementation's upper median among finite positive steps.
     diffs = t[1:] - t[:-1]
@@ -681,6 +808,8 @@ def compute_nustft(
             f"at this magnitude, but the median spacing is {dt_median:.3g} s."
             + _TIMESTAMP_PRECISION_REMEDY
         )
+    if host_t is not None:
+        dt_median = median_spacing(host_t)
     median_fs = 1.0 / dt_median
 
     if target_fs is not None and target_fs > median_fs:
@@ -694,30 +823,47 @@ def compute_nustft(
     nfft_padded = _next_power_of_two(nfft)
     n_pos_freqs = nfft_padded // 2 + 1
 
-    t_end = float(jax.device_get(t[-1]))
-    hop_s = window_s - overlap_s
-    starts = []
-    start = 0.0
-    while start + window_s <= t_end + dt_median:
-        starts.append(start)
-        start += hop_s
+    # The same grid senpy._grid.window_grid builds on the host: window k starts
+    # at k * hop after the origin.
+    t_end = float(host_t[-1]) if host_t is not None else float(jax.device_get(t[-1]))
+    n_windows = window_count(t_end, dt_median, window_s, hop_s)
+    starts = np.arange(n_windows, dtype=np.int64) * hop_s
 
+    complex_dtype = jnp.result_type(s, 1j)
     frequencies = jnp.arange(n_pos_freqs, dtype=t.dtype) / window_s
-    if not starts:
+    n_out_freqs = n_pos_freqs
+    if target_fs is not None and target_fs > 0.0:
+        n_out_freqs = int(math.floor((target_fs / 2.0) * window_s + 0.5)) + 1
+    frequencies_out = frequencies[:n_out_freqs]
+
+    def empty_result() -> JaxNUSTFTResult:
         return JaxNUSTFTResult(
-            frequencies=frequencies,
+            frequencies=frequencies_out,
             times=jnp.empty((0,), dtype=t.dtype),
-            coefficients=jnp.empty((0, n_pos_freqs), dtype=jnp.result_type(s, 1j)),
+            coefficients=jnp.empty((0, n_out_freqs), dtype=complex_dtype),
+            window_index=np.empty(0, dtype=np.int64),
+            sample_count=np.empty(0, dtype=np.int64),
+            valid=np.empty(0, dtype=bool),
+            origin_s=origin,
         )
 
-    starts_device = jnp.asarray(starts, dtype=t.dtype)
-    start_indices = jax.device_get(jnp.searchsorted(t, starts_device, side="left"))
-    end_indices = jax.device_get(jnp.searchsorted(t, starts_device + window_s, side="left"))
+    if n_windows == 0:
+        return empty_result()
+
+    if host_t is not None:
+        start_indices = np.searchsorted(host_t, starts, side="left")
+        end_indices = np.searchsorted(host_t, starts + window_s, side="left")
+    else:
+        starts_device = jnp.asarray(starts, dtype=t.dtype)
+        start_indices = np.asarray(jax.device_get(jnp.searchsorted(t, starts_device, side="left")))
+        end_indices = np.asarray(
+            jax.device_get(jnp.searchsorted(t, starts_device + window_s, side="left"))
+        )
+    grid_counts = (end_indices - start_indices).astype(np.int64)
     mode_indices = jnp.concatenate(
         (jnp.arange(nfft_padded // 2, nfft_padded), jnp.array([0]))
     )
     phase_correction = jnp.where(jnp.arange(n_pos_freqs) % 2 == 0, 1.0, -1.0)
-    complex_dtype = jnp.result_type(s, 1j)
 
     # Overlapping jittered windows have ragged source coordinates. Compile one
     # transform per observed source-count and reuse it for matching windows.
@@ -740,32 +886,34 @@ def compute_nustft(
         return transforms[n_samples]
 
     coefficients = []
-    output_times = []
-    for index, (first, last) in enumerate(zip(start_indices.tolist(), end_indices.tolist())):
-        if last - first < 4:
-            continue
+    computed = np.flatnonzero(grid_counts >= min_samples)
+    for index in computed.tolist():
+        first, last = int(start_indices[index]), int(end_indices[index])
         window_start = jnp.asarray(starts[index], dtype=t.dtype)
         coefficients.append(transform_for(last - first)(t[first:last], s[first:last], window_start))
-        output_times.append(index * hop_s + window_s / 2.0)
 
-    if not coefficients:
-        return JaxNUSTFTResult(
-            frequencies=frequencies,
-            times=jnp.empty((0,), dtype=t.dtype),
-            coefficients=jnp.empty((0, n_pos_freqs), dtype=complex_dtype),
-        )
+    if empty_windows == "drop":
+        if not coefficients:
+            return empty_result()
+        window_index = computed.astype(np.int64)
+        coefficients_array = jnp.stack(coefficients)[:, :n_out_freqs]
+    else:
+        window_index = np.arange(n_windows, dtype=np.int64)
+        coefficients_array = jnp.full((n_windows, n_out_freqs), jnp.nan, dtype=complex_dtype)
+        if coefficients:
+            coefficients_array = coefficients_array.at[computed].set(
+                jnp.stack(coefficients)[:, :n_out_freqs]
+            )
 
-    coefficients_array = jnp.stack(coefficients)
-    frequencies_out = frequencies
-    if target_fs is not None and target_fs > 0.0:
-        n_target_freqs = int(math.floor((target_fs / 2.0) * window_s + 0.5)) + 1
-        coefficients_array = coefficients_array[:, :n_target_freqs]
-        frequencies_out = frequencies[:n_target_freqs]
-
+    sample_count = grid_counts[window_index]
     return JaxNUSTFTResult(
         frequencies=frequencies_out,
-        times=jnp.asarray(output_times, dtype=t.dtype),
+        times=jnp.asarray(window_index * hop_s + window_s / 2.0, dtype=t.dtype),
         coefficients=coefficients_array,
+        window_index=window_index,
+        sample_count=sample_count,
+        valid=sample_count >= min_samples,
+        origin_s=origin,
     )
 
 
@@ -779,17 +927,25 @@ def compute_nufft_spectrogram(
     kind: str = "magnitude",
     detrend: bool = True,
     eps: float = 1e-6,
+    *,
+    origin_s: OriginSpec = None,
+    empty_windows: Optional[str] = None,
+    min_samples: int = DEFAULT_MIN_SAMPLES,
 ) -> JaxSpectrogramResult:
     """Compute a JAX-native NUFFT spectrogram without host array copies."""
-    return compute_nustft(
-        timestamps=timestamps,
-        signal=signal,
-        window_s=window_s,
-        overlap_s=overlap_s,
+    empty_windows = resolve_empty_windows(empty_windows)
+    return _compute_nustft(
+        timestamps,
+        signal,
+        window_s,
+        overlap_s,
         ts_unit=ts_unit,
         target_fs=target_fs,
         detrend=detrend,
         eps=eps,
+        origin_s=origin_s,
+        empty_windows=empty_windows,
+        min_samples=min_samples,
     ).spectrogram(kind)
 
 
@@ -804,17 +960,25 @@ def compute_nufft_welch(
     average: Literal["mean", "median"] = "mean",
     detrend: bool = True,
     eps: float = 1e-6,
+    *,
+    origin_s: OriginSpec = None,
+    empty_windows: Optional[str] = None,
+    min_samples: int = DEFAULT_MIN_SAMPLES,
 ) -> Tuple[Any, Any]:
     """Compute a JAX-native Welch-style reduction over NUFFT windows."""
-    return compute_nustft(
-        timestamps=timestamps,
-        signal=signal,
-        window_s=window_s,
-        overlap_s=overlap_s,
+    empty_windows = resolve_empty_windows(empty_windows)
+    return _compute_nustft(
+        timestamps,
+        signal,
+        window_s,
+        overlap_s,
         ts_unit=ts_unit,
         target_fs=target_fs,
         detrend=detrend,
         eps=eps,
+        origin_s=origin_s,
+        empty_windows=empty_windows,
+        min_samples=min_samples,
     ).welch(kind=kind, average=average)
 
 

@@ -11,9 +11,45 @@ from numpy.typing import NDArray
 # Import the C++ module
 import senpy._core as _senpy
 from ._version import __version__
+from ._grid import (
+    DEFAULT_MIN_SAMPLES,
+    WindowGrid,
+    relative_seconds as _relative_seconds,
+    resolve_empty_windows as _resolve_empty_windows,
+    resolve_origin as _resolve_origin,
+    validate_min_samples as _validate_min_samples,
+    window_grid,
+)
 
 
 AXIS_ORDER_TIME_FREQUENCY = "time_frequency"
+
+
+def _row_metadata(
+    n_rows: int,
+    window_index: Optional[NDArray[np.int64]],
+    sample_count: Optional[NDArray[np.int64]],
+    valid: Optional[NDArray[np.bool_]],
+) -> Tuple[Optional[NDArray[np.int64]], Optional[NDArray[np.int64]], NDArray[np.bool_]]:
+    """Validate the per-window metadata a result carries alongside its rows.
+
+    ``window_index`` and ``sample_count`` are ``None`` when unknown, as for a
+    result built by hand. ``valid`` defaults to every row being valid.
+    """
+    def _column(values, dtype, name):
+        if values is None:
+            return None
+        array = np.asarray(values, dtype=dtype)
+        if array.shape != (n_rows,):
+            raise ValueError(f"{name} must have one entry per time bin ({n_rows}), got {array.shape}")
+        return array
+
+    window_index = _column(window_index, np.int64, "window_index")
+    sample_count = _column(sample_count, np.int64, "sample_count")
+    valid = _column(valid, bool, "valid")
+    if valid is None:
+        valid = np.ones(n_rows, dtype=bool)
+    return window_index, sample_count, valid
 
 
 def _normalize_spectral_kind(kind: str) -> str:
@@ -120,6 +156,14 @@ class SpectrogramResult:
         kind: Spectral quantity stored in ``Sxx``: ``"magnitude"``,
             ``"power"``, or ``"psd"``.
         method: Computation method, such as ``"nufft"`` or ``"uniform_fft"``.
+        window_index: NUFFT results: each row's index on the window grid, so
+            gaps show where windows were left out. ``None`` if unknown.
+        sample_count: NUFFT results: samples in each row's window. ``None`` if
+            unknown.
+        valid: ``False`` for rows with too few samples to transform, which
+            hold NaN (``empty_windows="keep"``). All ``True`` otherwise.
+        origin_s: NUFFT results: absolute start of window 0, in seconds on the
+            input timestamps' clock. ``times`` are measured from it.
     """
 
     def __init__(
@@ -129,6 +173,10 @@ class SpectrogramResult:
         Sxx: NDArray[np.float64],
         kind: str = "magnitude",
         method: str = "unknown",
+        window_index: Optional[NDArray[np.int64]] = None,
+        sample_count: Optional[NDArray[np.int64]] = None,
+        valid: Optional[NDArray[np.bool_]] = None,
+        origin_s: Optional[float] = None,
     ):
         self.frequencies = np.asarray(frequencies, dtype=np.float64)
         self.times = np.asarray(times, dtype=np.float64)
@@ -144,6 +192,10 @@ class SpectrogramResult:
                 f"Sxx shape {self.Sxx.shape} does not match "
                 f"(len(times), len(frequencies)) {expected_shape}"
             )
+        self.window_index, self.sample_count, self.valid = _row_metadata(
+            len(self.times), window_index, sample_count, valid
+        )
+        self.origin_s = None if origin_s is None else float(origin_s)
 
     @property
     def frequency_resolution(self) -> float:
@@ -206,6 +258,11 @@ class NUSTFTResult:
     scaled complex FINUFFT coefficients. Derived spectra are exposed as views
     so callers can choose magnitude, power, PSD-like density, or Welch-style
     averages without recomputing the transform.
+
+    ``times`` are window centres in seconds after ``origin_s``. ``window_index``,
+    ``sample_count``, and ``valid`` describe each row's window; with
+    ``empty_windows="keep"`` every window on the grid has a row and those
+    without enough samples hold NaN coefficients with ``valid`` False.
     """
 
     def __init__(
@@ -213,6 +270,10 @@ class NUSTFTResult:
         frequencies: NDArray[np.float64],
         times: NDArray[np.float64],
         coefficients: NDArray[np.complex128],
+        window_index: Optional[NDArray[np.int64]] = None,
+        sample_count: Optional[NDArray[np.int64]] = None,
+        valid: Optional[NDArray[np.bool_]] = None,
+        origin_s: Optional[float] = None,
     ):
         self.frequencies = np.asarray(frequencies, dtype=np.float64)
         self.times = np.asarray(times, dtype=np.float64)
@@ -227,6 +288,10 @@ class NUSTFTResult:
                 f"coefficients shape {self.coefficients.shape} does not match "
                 f"(len(times), len(frequencies)) {expected_shape}"
             )
+        self.window_index, self.sample_count, self.valid = _row_metadata(
+            len(self.times), window_index, sample_count, valid
+        )
+        self.origin_s = None if origin_s is None else float(origin_s)
 
     @property
     def shape(self) -> Tuple[int, int]:
@@ -291,6 +356,10 @@ class NUSTFTResult:
             Sxx=self._surface(kind),
             kind=kind,
             method="nufft",
+            window_index=self.window_index,
+            sample_count=self.sample_count,
+            valid=self.valid,
+            origin_s=self.origin_s,
         )
 
     def welch(
@@ -322,6 +391,9 @@ class StackedSpectrogramResult:
         Sxx: Array shaped ``(n_times, n_freqs, n_channels)``.
         channels: Ordered list of channel names, one per ``Sxx[:, :, i]``.
         kind: Spectral quantity stored in ``Sxx``.
+        window_index, sample_count, valid, origin_s: As on
+            :class:`SpectrogramResult`. ``sample_count`` is the reference
+            channel's; ``valid`` is ``False`` where any channel has no data.
     """
 
     def __init__(
@@ -331,6 +403,10 @@ class StackedSpectrogramResult:
         Sxx: NDArray[np.float64],
         channels: List[str],
         kind: str = "magnitude",
+        window_index: Optional[NDArray[np.int64]] = None,
+        sample_count: Optional[NDArray[np.int64]] = None,
+        valid: Optional[NDArray[np.bool_]] = None,
+        origin_s: Optional[float] = None,
     ):
         self.frequencies = np.asarray(frequencies, dtype=np.float64)
         self.times = np.asarray(times, dtype=np.float64)
@@ -345,6 +421,10 @@ class StackedSpectrogramResult:
                 f"Sxx.shape={self.Sxx.shape} does not match "
                 f"(n_times={expected[0]}, n_freqs={expected[1]}, n_channels={expected[2]})"
             )
+        self.window_index, self.sample_count, self.valid = _row_metadata(
+            len(self.times), window_index, sample_count, valid
+        )
+        self.origin_s = None if origin_s is None else float(origin_s)
 
     @property
     def n_channels(self) -> int:
@@ -601,6 +681,42 @@ def _validate_time_window(window_s: float, overlap_s: float) -> None:
         raise ValueError("overlap_s must satisfy 0 <= overlap_s < window_s")
 
 
+def _grid_rows(
+    rows: NDArray,
+    window_indices: NDArray[np.int64],
+    grid_sample_counts: NDArray[np.int64],
+    *,
+    window_s: float,
+    overlap_s: float,
+    min_samples: int,
+    empty_windows: str,
+) -> Dict[str, NDArray]:
+    """Lay transformed windows out on the grid, dropping or NaN-filling the rest.
+
+    ``rows`` holds one row per entry of ``window_indices`` -- the windows with
+    at least ``min_samples`` samples. ``grid_sample_counts`` has one entry per
+    window on the grid.
+    """
+    window_indices = np.asarray(window_indices, dtype=np.int64)
+    grid_sample_counts = np.asarray(grid_sample_counts, dtype=np.int64)
+    rows = np.asarray(rows)
+    if empty_windows == "keep":
+        n_windows = grid_sample_counts.size
+        dense = np.full((n_windows,) + rows.shape[1:], np.nan, dtype=rows.dtype)
+        dense[window_indices] = rows
+        rows = dense
+        window_indices = np.arange(n_windows, dtype=np.int64)
+    sample_count = grid_sample_counts[window_indices]
+    hop_s = float(window_s) - float(overlap_s)
+    return {
+        "rows": rows,
+        "times": window_indices * hop_s + float(window_s) / 2.0,
+        "window_index": window_indices,
+        "sample_count": sample_count,
+        "valid": sample_count >= min_samples,
+    }
+
+
 def _validate_sample_window(nperseg: int, noverlap: int) -> None:
     if nperseg <= 0:
         raise ValueError("rounded window_s * target_fs must be at least 1 sample")
@@ -618,6 +734,10 @@ def compute_nustft(
     ts_unit: str = "s",
     target_fs: Optional[float] = None,
     detrend: bool = True,
+    *,
+    origin_s: Union[None, float, str] = None,
+    empty_windows: Optional[str] = None,
+    min_samples: int = DEFAULT_MIN_SAMPLES,
 ) -> NUSTFTResult:
     """Compute complex non-uniform STFT coefficients using FINUFFT.
 
@@ -635,10 +755,53 @@ def compute_nustft(
             ``1 / window_s``.
         detrend: If true, subtract each window's mean before applying the Hann
             taper. Set false to preserve DC/low-frequency offsets.
+        origin_s: Where window 0 starts. ``None`` (the default) is the first
+            sample. A number is an absolute time in seconds on the
+            timestamps' clock -- for example the start of a reference
+            recording, so every window lines up with it; samples before it
+            are ignored. ``"unix"`` anchors the grid a whole number of hops
+            from the Unix epoch, at or after the first sample, so windows from
+            separate recordings or sessions share one grid.
+        empty_windows: ``"drop"`` leaves out windows with fewer than
+            ``min_samples`` samples, so ``times`` has gaps. ``"keep"`` reports
+            every window on the grid; those rows hold NaN and ``valid`` is
+            False. Omitting it means ``"drop"`` and warns: senpy 5.0 changes
+            the default to ``"keep"``.
+        min_samples: Fewest samples a window needs to be transformed.
 
     Returns:
-        ``NUSTFTResult`` with complex coefficients shaped ``(n_times, n_freqs)``.
+        ``NUSTFTResult`` with complex coefficients shaped ``(n_times, n_freqs)``,
+        ``times`` measured from ``origin_s``, and per-window ``window_index``,
+        ``sample_count`` and ``valid``.
     """
+    empty_windows = _resolve_empty_windows(empty_windows)
+    return _compute_nustft(
+        timestamps,
+        signal,
+        window_s,
+        overlap_s,
+        ts_unit=ts_unit,
+        target_fs=target_fs,
+        detrend=detrend,
+        origin_s=origin_s,
+        empty_windows=empty_windows,
+        min_samples=min_samples,
+    )
+
+
+def _compute_nustft(
+    timestamps: NDArray[np.float64],
+    signal: NDArray[np.float64],
+    window_s: float,
+    overlap_s: float,
+    *,
+    ts_unit: str,
+    target_fs: Optional[float],
+    detrend: bool,
+    origin_s: Union[None, float, str],
+    empty_windows: str,
+    min_samples: int,
+) -> NUSTFTResult:
     if len(timestamps) != len(signal):
         raise ValueError("timestamps and signal must have the same length")
     if len(timestamps) < 2:
@@ -646,8 +809,9 @@ def compute_nustft(
     _validate_time_window(window_s, overlap_s)
     if target_fs is not None and target_fs < 0:
         raise ValueError("target_fs must be >= 0")
+    min_samples = _validate_min_samples(min_samples)
 
-    t = _timestamps_to_seconds(timestamps, ts_unit)
+    t, origin = _relative_seconds(timestamps, ts_unit, origin_s, float(window_s - overlap_s))
     target_fs_val = target_fs if target_fs is not None else 0.0
 
     try:
@@ -658,17 +822,37 @@ def compute_nustft(
             float(overlap_s),
             float(target_fs_val),
             bool(detrend),
+            0.0,
+            min_samples,
         )
     except RuntimeError as e:
         raise RuntimeError(f"C++ NUSTFT computation failed: {e}") from e
 
-    if len(result_dict["times"]) == 0 and len(result_dict["freqs"]) > 0:
+    grid_counts = result_dict["grid_sample_counts"]
+    if (empty_windows == "drop" and len(result_dict["times"]) == 0) or len(grid_counts) == 0:
         raise ValueError("compute_nustft requires enough data for at least one window")
 
+    frequencies = result_dict["freqs"]
+    coefficients = result_dict["coefficients"]
+    if coefficients.shape[0] == 0:
+        coefficients = np.empty((0, len(frequencies)), dtype=np.complex128)
+    laid_out = _grid_rows(
+        coefficients,
+        result_dict["window_indices"],
+        grid_counts,
+        window_s=window_s,
+        overlap_s=overlap_s,
+        min_samples=min_samples,
+        empty_windows=empty_windows,
+    )
     return NUSTFTResult(
-        frequencies=result_dict["freqs"],
-        times=result_dict["times"],
-        coefficients=result_dict["coefficients"],
+        frequencies=frequencies,
+        times=laid_out["times"],
+        coefficients=laid_out["rows"],
+        window_index=laid_out["window_index"],
+        sample_count=laid_out["sample_count"],
+        valid=laid_out["valid"],
+        origin_s=origin,
     )
 
 
@@ -743,6 +927,13 @@ class StreamingNUSTFT:
             ``window_s`` and the returned times are always in seconds. Note that absolute unix
             seconds in float64 resolve to about half a microsecond; pass times relative to a
             recent origin when sub-microsecond timing matters.
+        min_samples: Fewest samples a window needs to be reported. Sparser windows are counted
+            by :attr:`skipped_windows`; windows with no samples at all are never seen. Either
+            kind shows up as a gap in the reported ``index`` values.
+
+    For a grid shared across sessions, anchor it to the Unix epoch: ``origin_s=0.0`` with Unix
+    timestamps puts windows on the same grid ``compute_nustft(..., origin_s="unix")`` uses, with
+    each ``index`` counted from the epoch.
 
     Example:
         >>> transform = StreamingNUSTFT(30.0, 0.0, 1.0, sample_rate_hz=100.0, fmax=5.0)
@@ -762,6 +953,7 @@ class StreamingNUSTFT:
         origin_s: float = 0.0,
         detrend: bool = True,
         ts_unit: str = "s",
+        min_samples: int = DEFAULT_MIN_SAMPLES,
     ):
         _validate_time_window(window_s, overlap_s)
         if subwindow_s <= 0 or subwindow_s > window_s:
@@ -779,6 +971,7 @@ class StreamingNUSTFT:
             fmax=float(fmax) if fmax is not None else 0.0,
             origin=float(origin_s),
             detrend=bool(detrend),
+            min_samples=_validate_min_samples(min_samples),
         )
         self.frequencies = self._impl.frequencies()
 
@@ -816,7 +1009,7 @@ class StreamingNUSTFT:
 
     @property
     def skipped_windows(self) -> int:
-        """Windows too sparse to transform (under four samples), as ``compute_nustft`` skips."""
+        """Windows that held samples, but fewer than ``min_samples``, as ``compute_nustft`` skips."""
         return self._impl.skipped_windows
 
     @property
@@ -835,17 +1028,37 @@ def compute_nustft_streaming(
     fmax: Optional[float] = None,
     detrend: bool = True,
     chunk: int = 1024,
+    *,
+    origin_s: Union[None, float, str] = None,
+    empty_windows: Optional[str] = None,
+    min_samples: int = DEFAULT_MIN_SAMPLES,
 ) -> NUSTFTResult:
     """Runs a whole array through :class:`StreamingNUSTFT` and returns an ``NUSTFTResult``.
 
     Mostly a convenience for testing the streaming path against ``compute_nustft``: with
     ``sample_rate_hz`` left to default it reproduces that function's coefficients to roughly
     1e-13 relative. Production callers stream with :class:`StreamingNUSTFT` directly.
+    ``origin_s``, ``empty_windows`` and ``min_samples`` are as in ``compute_nustft``, and the
+    windows are the same ones.
     """
-    t = _timestamps_to_seconds(timestamps, ts_unit)
+    empty_windows = _resolve_empty_windows(empty_windows)
+    min_samples = _validate_min_samples(min_samples)
     values = np.asarray(signal, dtype=np.float64)
-    if len(t) < 2:
+    if len(timestamps) < 2:
         raise ValueError("compute_nustft_streaming requires at least two timestamps")
+    # The grid is built from the samples in time order. The stream sees them as given: it drops
+    # a sample whose subwindow it has already closed (counted in dropped_samples), but disorder
+    # within one subwindow goes unnoticed. The counts below report what it actually used.
+    grid = window_grid(
+        np.sort(np.asarray(timestamps, dtype=np.float64)),
+        window_s,
+        overlap_s,
+        origin_s=origin_s,
+        min_samples=min_samples,
+        ts_unit=ts_unit,
+    )
+    # Stream times relative to the origin, exactly as the batch transforms see them.
+    t, _ = _relative_seconds(timestamps, ts_unit, grid.origin_s, grid.hop_s)
     if sample_rate_hz is None:
         sample_rate_hz = 1.0 / float(np.median(np.diff(t)))
 
@@ -855,25 +1068,52 @@ def compute_nustft_streaming(
         subwindow_s=subwindow_s,
         sample_rate_hz=sample_rate_hz,
         fmax=fmax,
-        origin_s=float(t[0]),
+        origin_s=0.0,
         detrend=detrend,
+        min_samples=min_samples,
     )
     windows: List[StreamingWindow] = []
     for start in range(0, len(t), chunk):
         windows.extend(transform.push(t[start : start + chunk], values[start : start + chunk]))
     # push() only reports windows the stream has passed the end of. compute_nustft, which sees
     # where the recording stops, also emits a final window that ends within one sample period
-    # of the last timestamp; take that one out of the flush and drop anything shorter.
-    limit = float(t[-1]) + 1.0 / sample_rate_hz
-    windows.extend(w for w in transform.flush() if w.start + window_s <= limit)
+    # of the last timestamp; take that one out of the flush and drop anything past the grid.
+    windows.extend(transform.flush())
+    windows = [w for w in windows if w.index < grid.n_windows]
 
-    if not windows:
+    if grid.n_windows == 0 or (empty_windows == "drop" and not windows):
         raise ValueError("compute_nustft_streaming requires enough data for at least one window")
+    frequencies = transform.frequencies
+    coefficients = (
+        np.stack([w.coefficients for w in windows])
+        if windows
+        else np.empty((0, len(frequencies)), dtype=np.complex128)
+    )
+    emitted = np.array([w.index for w in windows], dtype=np.int64)
+    # Report what the stream actually used: samples it had to drop (out of
+    # order, or non-finite) are missing from its counts, so a window the grid
+    # thinks is full may have come out sparse or not at all.
+    sample_count = grid.sample_count.copy()
+    sample_count[emitted] = [w.sample_count for w in windows]
+    laid_out = _grid_rows(
+        coefficients,
+        emitted,
+        sample_count,
+        window_s=window_s,
+        overlap_s=overlap_s,
+        min_samples=min_samples,
+        empty_windows=empty_windows,
+    )
+    was_emitted = np.zeros(grid.n_windows, dtype=bool)
+    was_emitted[emitted] = True
     return NUSTFTResult(
-        frequencies=transform.frequencies,
-        # compute_nustft reports window centers relative to the first timestamp.
-        times=np.array([w.center - t[0] for w in windows], dtype=np.float64),
-        coefficients=np.stack([w.coefficients for w in windows]),
+        frequencies=frequencies,
+        times=laid_out["times"],
+        coefficients=laid_out["rows"],
+        window_index=laid_out["window_index"],
+        sample_count=laid_out["sample_count"],
+        valid=was_emitted[laid_out["window_index"]],
+        origin_s=grid.origin_s,
     )
 
 
@@ -886,11 +1126,47 @@ def compute_nufft_spectrogram(
     target_fs: Optional[float] = None,
     kind: str = "magnitude",
     detrend: bool = True,
+    *,
+    origin_s: Union[None, float, str] = None,
+    empty_windows: Optional[str] = None,
+    min_samples: int = DEFAULT_MIN_SAMPLES,
 ) -> SpectrogramResult:
     """Compute a FINUFFT-backed spectrogram from non-uniform samples.
 
     Use ``compute_nustft`` when phase or custom spectral reductions are needed.
+    ``origin_s``, ``empty_windows`` and ``min_samples`` are as there; with
+    ``empty_windows="keep"`` rows without enough data hold NaN.
     """
+    empty_windows = _resolve_empty_windows(empty_windows)
+    return _compute_nufft_spectrogram(
+        timestamps,
+        signal,
+        window_s,
+        overlap_s,
+        ts_unit=ts_unit,
+        target_fs=target_fs,
+        kind=kind,
+        detrend=detrend,
+        origin_s=origin_s,
+        empty_windows=empty_windows,
+        min_samples=min_samples,
+    )
+
+
+def _compute_nufft_spectrogram(
+    timestamps: NDArray[np.float64],
+    signal: NDArray[np.float64],
+    window_s: float,
+    overlap_s: float,
+    *,
+    ts_unit: str,
+    target_fs: Optional[float],
+    kind: str,
+    detrend: bool,
+    origin_s: Union[None, float, str],
+    empty_windows: str,
+    min_samples: int,
+) -> SpectrogramResult:
     if len(timestamps) != len(signal):
         raise ValueError("timestamps and signal must have the same length")
     if len(timestamps) < 2:
@@ -898,8 +1174,9 @@ def compute_nufft_spectrogram(
     _validate_time_window(window_s, overlap_s)
     if target_fs is not None and target_fs < 0:
         raise ValueError("target_fs must be >= 0")
+    min_samples = _validate_min_samples(min_samples)
 
-    t = _timestamps_to_seconds(timestamps, ts_unit)
+    t, origin = _relative_seconds(timestamps, ts_unit, origin_s, float(window_s - overlap_s))
     target_fs_val = target_fs if target_fs is not None else 0.0
     normalized_kind = _normalize_spectral_kind(kind)
 
@@ -912,19 +1189,38 @@ def compute_nufft_spectrogram(
             float(target_fs_val),
             normalized_kind,
             bool(detrend),
+            0.0,
+            min_samples,
         )
     except RuntimeError as e:
         raise RuntimeError(f"C++ NUFFT spectrogram computation failed: {e}") from e
 
-    if len(result["times"]) == 0 and len(result["freqs"]) > 0:
+    grid_counts = result["grid_sample_counts"]
+    if (empty_windows == "drop" and len(result["times"]) == 0) or len(grid_counts) == 0:
         raise ValueError("compute_nufft_spectrogram requires enough data for at least one window")
 
+    Sxx = result["Sxx"]
+    if Sxx.shape[0] == 0:
+        Sxx = np.empty((0, len(result["freqs"])), dtype=np.float64)
+    laid_out = _grid_rows(
+        Sxx,
+        result["window_indices"],
+        grid_counts,
+        window_s=window_s,
+        overlap_s=overlap_s,
+        min_samples=min_samples,
+        empty_windows=empty_windows,
+    )
     return SpectrogramResult(
         frequencies=result["freqs"],
-        times=result["times"],
-        Sxx=result["Sxx"],
+        times=laid_out["times"],
+        Sxx=laid_out["rows"],
         method="nufft",
         kind=normalized_kind,
+        window_index=laid_out["window_index"],
+        sample_count=laid_out["sample_count"],
+        valid=laid_out["valid"],
+        origin_s=origin,
     )
 
 
@@ -938,16 +1234,28 @@ def compute_nufft_welch(
     kind: str = "psd",
     average: str = "mean",
     detrend: bool = True,
+    *,
+    origin_s: Union[None, float, str] = None,
+    empty_windows: Optional[str] = None,
+    min_samples: int = DEFAULT_MIN_SAMPLES,
 ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Compute a Welch-style average spectrum using FINUFFT windows."""
-    return compute_nustft(
-        timestamps=timestamps,
-        signal=signal,
-        window_s=window_s,
-        overlap_s=overlap_s,
+    """Compute a Welch-style average spectrum using FINUFFT windows.
+
+    Empty windows never enter the average: ``"drop"`` leaves them out and
+    ``"keep"`` fills them with NaN, which the NaN-aware average skips.
+    """
+    empty_windows = _resolve_empty_windows(empty_windows)
+    return _compute_nustft(
+        timestamps,
+        signal,
+        window_s,
+        overlap_s,
         ts_unit=ts_unit,
         target_fs=target_fs,
         detrend=detrend,
+        origin_s=origin_s,
+        empty_windows=empty_windows,
+        min_samples=min_samples,
     ).welch(kind=kind, average=average)
 
 
@@ -960,6 +1268,10 @@ def compute_stacked_spectrograms(
     detrend: bool = True,
     channels: Optional[List[str]] = None,
     use_diff: bool = True,
+    *,
+    origin_s: Union[None, float, str] = None,
+    empty_windows: Optional[str] = None,
+    min_samples: int = DEFAULT_MIN_SAMPLES,
 ) -> StackedSpectrogramResult:
     """Compute per-axis NUFFT spectrograms and stack along the channel axis.
 
@@ -984,6 +1296,10 @@ def compute_stacked_spectrograms(
         channels: Ordered list of channels to include. Defaults to
             ``["x", "y", "z", "mag", "jerk"]``.
         use_diff: Finite-difference jerk (``True``) or C++ gradient estimator (``False``).
+        origin_s, empty_windows, min_samples: As in :func:`compute_nustft`. The
+            origin is resolved once from the accelerometer timestamps and
+            shared by every channel, so a window index names the same window
+            in every channel and rows are matched by it.
 
     Returns:
         ``StackedSpectrogramResult`` with ``Sxx`` shaped ``(T, F, len(channels))``.
@@ -991,21 +1307,27 @@ def compute_stacked_spectrograms(
     if channels is None:
         channels = list(STACKED_SPECTROGRAM_CHANNELS)
 
+    empty_windows = _resolve_empty_windows(empty_windows)
     _validate_time_window(window_s, overlap_s)
     t_s = accel.timestamps_s
+    origin = _resolve_origin(origin_s, float(t_s[0]), float(window_s - overlap_s))
 
     def _spec(
         signal: NDArray[np.float64],
         timestamps: NDArray[np.float64] = t_s,
     ) -> SpectrogramResult:
-        return compute_nufft_spectrogram(
-            timestamps=timestamps,
-            signal=np.ascontiguousarray(signal, dtype=np.float64),
-            window_s=window_s,
-            overlap_s=overlap_s,
+        return _compute_nufft_spectrogram(
+            timestamps,
+            np.ascontiguousarray(signal, dtype=np.float64),
+            window_s,
+            overlap_s,
+            ts_unit="s",
             target_fs=target_fs,
             kind=kind,
             detrend=detrend,
+            origin_s=origin,
+            empty_windows=empty_windows,
+            min_samples=min_samples,
         )
 
     channel_specs: Dict[str, SpectrogramResult] = {}
@@ -1035,37 +1357,34 @@ def compute_stacked_spectrograms(
 
     ref_ch = next((c for c in channels if c != "jerk"), channels[0])
     ref_spec = channel_specs[ref_ch]
-    ref_times = ref_spec.times
+    ref_index = ref_spec.window_index
     frequencies = ref_spec.frequencies
-    T = len(ref_times)
+    T = len(ref_index)
     F = len(frequencies)
     C = len(channels)
-    tol = (window_s - overlap_s) / 2.0
 
-    Sxx = np.empty((T, F, C), dtype=np.float64)
+    # Every channel shares the origin, so a window index names the same window
+    # in each. Match rows by index.
+    Sxx = np.full((T, F, C), np.nan, dtype=np.float64)
+    valid = ref_spec.valid.copy()
     unmatched: Dict[str, int] = {}
     for i, ch in enumerate(channels):
         spec = channel_specs[ch]
-        if np.array_equal(spec.times, ref_times):
-            Sxx[:, :, i] = spec.Sxx
-        else:
-            Sxx[:, :, i] = np.nan
-            n = len(spec.times)
-            if n > 0:
-                idx = np.searchsorted(spec.times, ref_times)
-                left = np.clip(idx - 1, 0, n - 1)
-                right = np.clip(idx, 0, n - 1)
-                left_dists = np.abs(spec.times[left] - ref_times)
-                right_dists = np.abs(spec.times[right] - ref_times)
-                best = np.where(left_dists <= right_dists, left, right)
-                best_dists = np.minimum(left_dists, right_dists)
-                mask = best_dists <= tol
-                Sxx[mask, :, i] = spec.Sxx[best[mask]]
-                n_unmatched = int(T - np.count_nonzero(mask))
-            else:
-                n_unmatched = T
-            if n_unmatched:
-                unmatched[ch] = n_unmatched
+        position = np.searchsorted(spec.window_index, ref_index)
+        position = np.minimum(position, max(len(spec.window_index) - 1, 0))
+        found = (
+            spec.window_index[position] == ref_index
+            if len(spec.window_index)
+            else np.zeros(T, dtype=bool)
+        )
+        Sxx[found, :, i] = spec.Sxx[position[found]]
+        channel_valid = np.zeros(T, dtype=bool)
+        channel_valid[found] = spec.valid[position[found]]
+        # Rows the reference itself has no data for are expected to be NaN.
+        n_unmatched = int(np.count_nonzero(ref_spec.valid & ~channel_valid))
+        if n_unmatched:
+            unmatched[ch] = n_unmatched
+        valid &= channel_valid
 
     if unmatched:
         detail = ", ".join(
@@ -1073,19 +1392,23 @@ def compute_stacked_spectrograms(
         )
         warnings.warn(
             "compute_stacked_spectrograms produced NaN-filled time bins for "
-            f"channels that could not be aligned to the reference grid within "
-            f"tol={tol:g}s ({detail}). These appear as NaN in Sxx; downstream "
-            "reductions must handle them (e.g. np.nanmean) or filter them out.",
+            f"channels with no data in windows the {ref_ch!r} channel has ({detail}). "
+            "These appear as NaN in Sxx with valid=False; downstream reductions must "
+            "handle them (e.g. np.nanmean) or filter them out.",
             RuntimeWarning,
             stacklevel=2,
         )
 
     return StackedSpectrogramResult(
         frequencies=frequencies,
-        times=ref_times,
+        times=ref_spec.times,
         Sxx=Sxx,
         channels=channels,
         kind=_normalize_spectral_kind(kind),
+        window_index=ref_index,
+        sample_count=ref_spec.sample_count,
+        valid=valid,
+        origin_s=origin,
     )
 
 
@@ -1584,6 +1907,8 @@ __all__ = [
     "compute_nufft_spectrogram",
     "compute_nufft_welch",
     "compute_stacked_spectrograms",
+    "window_grid",
+    "WindowGrid",
     "compute_jerk",
     "compute_magnitude",
     "compute_uniform_spectrogram",
