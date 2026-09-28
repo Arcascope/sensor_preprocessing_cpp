@@ -714,6 +714,11 @@ def compute_nustft(
         origin_s, empty_windows, min_samples: As in
             :func:`senpy.api.compute_nustft`; the windows are the same ones.
             With ``empty_windows="keep"`` rows without enough samples hold NaN.
+
+    Unlike the CPU API, which raises ``ValueError`` when there is nothing to
+    report -- no window on the grid, or none with enough samples in
+    ``"drop"`` mode -- this returns a result with zero rows, as it always has.
+    senpy 5.0 will make it raise like the CPU API.
     """
     empty_windows = resolve_empty_windows(empty_windows)
     return _compute_nustft(

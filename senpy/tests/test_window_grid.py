@@ -309,6 +309,53 @@ def test_stacked_drop_mode_matches_keep_on_valid_rows():
     np.testing.assert_array_equal(dropped.Sxx, kept.Sxx[kept.valid])
 
 
+# ── nothing to report ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"empty_windows": "drop", "min_samples": 100_000},  # no window has enough samples
+        {"empty_windows": "keep", "origin_s": 10_000.0},  # no window on the grid at all
+        {"empty_windows": "drop", "origin_s": 10_000.0},
+    ],
+)
+def test_cpu_and_streaming_raise_when_there_is_nothing_to_report(kwargs):
+    t, x = recording()
+    with pytest.raises(ValueError, match="at least one window"):
+        nustft(t, x, **kwargs)
+    with pytest.raises(ValueError, match="at least one window"):
+        senpy.compute_nustft_streaming(t, x, WINDOW_S, OVERLAP_S, subwindow_s=HOP_S, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"empty_windows": "drop", "min_samples": 100_000},
+        {"empty_windows": "keep", "origin_s": 10_000.0},
+    ],
+)
+def test_jax_returns_zero_rows_when_there_is_nothing_to_report(kwargs):
+    # Its historical behavior, kept through 4.x; senpy 5.0 makes it raise like the CPU API.
+    pytest.importorskip("jax")
+    from senpy import jax_backend as senpy_jax
+
+    t, x = recording()
+    result = senpy_jax.compute_nustft(t, x, WINDOW_S, OVERLAP_S, **kwargs)
+
+    assert result.coefficients.shape[0] == 0
+    assert result.window_index.size == result.sample_count.size == result.valid.size == 0
+
+
+def test_keep_mode_with_every_window_too_sparse_is_all_nan_not_an_error():
+    t, x = recording()
+    result = nustft(t, x, empty_windows="keep", min_samples=100_000)
+
+    assert result.valid.size == senpy.window_grid(t, WINDOW_S, OVERLAP_S).n_windows
+    assert not result.valid.any()
+    assert np.isnan(result.coefficients).all()
+
+
 # ── the 5.0 default change ──────────────────────────────────────────
 
 

@@ -75,6 +75,11 @@ result.coefficients[~result.valid]   # all NaN: dropouts, visible on the grid
 > **Deprecation notice.** `empty_windows` defaults to `"drop"` in 4.x, matching earlier releases,
 > and omitting it raises a `FutureWarning`. **senpy 5.0 will change the default to `"keep"`.**
 > New code should pass `empty_windows="keep"`; pass `"drop"` explicitly to keep today's output.
+>
+> **With nothing to report** -- no window on the grid, or none with `min_samples` samples in
+> `"drop"` mode -- the CPU and streaming functions raise `ValueError`, while the
+> `senpy.jax_backend` transforms return a zero-row result, as they always have. senpy 5.0 will
+> make the JAX transforms raise too.
 
 Timestamps are measured from the origin once, in the input's own unit, before scaling to
 seconds, so Unix microsecond timestamps (~1.7e15) keep their full precision.
