@@ -126,7 +126,10 @@ first sample in float64 before reaching the device. If you build the
 timestamp array with JAX yourself, either enable x64 first or make the values
 relative to the first sample; float32 cannot resolve millisecond spacing at
 epoch magnitude, and `compute_nustft` rejects such an array rather than
-returning a wrongly scaled result.
+returning a wrongly scaled result. Integer epoch arrays are worse: without x64,
+`jnp.asarray` wraps int64 values to int32 before senpy sees them, which cannot
+be detected. Spacing survives the wrap but absolute time does not, so pass
+NumPy timestamps whenever `origin_s` is a number or `"unix"`.
 
 For high-throughput three-axis work across recordings, pre-pack ragged windows
 into a small set of static shapes, then run each batch on the JAX device:

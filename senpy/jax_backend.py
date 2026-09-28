@@ -403,7 +403,11 @@ def _to_centered_seconds(
         if origin != first_s:
             centered = centered + (first_s - origin)
         if not jnp.issubdtype(timestamps.dtype, jnp.floating):
-            # Integer timestamps represent every value in range exactly.
+            # An integer array holds its values exactly -- but without x64,
+            # jnp.asarray already wrapped int64 epoch values to int32 before
+            # they got here, which cannot be detected. Differences survive the
+            # wrap; the absolute values that origin_s="unix" or a numeric
+            # origin rely on do not. The docstring tells callers to pass NumPy.
             return centered, 0.0, origin
         magnitude = float(jax.device_get(jnp.max(jnp.abs(timestamps))))
         gap = magnitude * float(jnp.finfo(timestamps.dtype).eps) * scale
@@ -701,7 +705,11 @@ def compute_nustft(
             input is centered on the first sample in float64 before it reaches
             the device, so absolute epoch values are safe without x64. A JAX
             array is used at whatever dtype the caller built it with, and is
-            rejected if that dtype cannot resolve the sample spacing.
+            rejected if a float dtype cannot resolve the sample spacing.
+            Without x64, ``jnp.asarray`` silently wraps int64 epoch values
+            to int32; spacing survives that, but the absolute times an
+            explicit ``origin_s`` or ``"unix"`` depends on do not -- pass
+            NumPy timestamps (or enable x64) when using either.
         signal: One-dimensional JAX-compatible sample values.
         window_s: Window duration in seconds.
         overlap_s: Window overlap in seconds.

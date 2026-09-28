@@ -1081,22 +1081,30 @@ def compute_nustft_streaming(
         if windows
         else np.empty((0, len(frequencies)), dtype=np.complex128)
     )
+    emitted = np.array([w.index for w in windows], dtype=np.int64)
+    # Report what the stream actually used: samples it had to drop (out of
+    # order, or non-finite) are missing from its counts, so a window the grid
+    # thinks is full may have come out sparse or not at all.
+    sample_count = grid.sample_count.copy()
+    sample_count[emitted] = [w.sample_count for w in windows]
     laid_out = _grid_rows(
         coefficients,
-        np.array([w.index for w in windows], dtype=np.int64),
-        grid.sample_count,
+        emitted,
+        sample_count,
         window_s=window_s,
         overlap_s=overlap_s,
         min_samples=min_samples,
         empty_windows=empty_windows,
     )
+    was_emitted = np.zeros(grid.n_windows, dtype=bool)
+    was_emitted[emitted] = True
     return NUSTFTResult(
         frequencies=frequencies,
         times=laid_out["times"],
         coefficients=laid_out["rows"],
         window_index=laid_out["window_index"],
         sample_count=laid_out["sample_count"],
-        valid=laid_out["valid"],
+        valid=was_emitted[laid_out["window_index"]],
         origin_s=grid.origin_s,
     )
 

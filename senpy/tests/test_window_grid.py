@@ -398,6 +398,22 @@ def test_unknown_empty_windows_is_refused():
         nustft(t, x, empty_windows="fill")
 
 
+def test_streaming_wrapper_reports_the_counts_the_stream_used():
+    # Samples out of order are dropped by the stream; the reported counts and validity
+    # must describe the windows it actually computed, not the grid's ideal.
+    t, x = recording()
+    order = np.arange(t.size)
+    order[2000:2100] = order[2000:2100][::-1]
+    result = senpy.compute_nustft_streaming(
+        t[order], x[order], WINDOW_S, OVERLAP_S, subwindow_s=HOP_S, empty_windows="keep"
+    )
+    grid = senpy.window_grid(t, WINDOW_S, OVERLAP_S)
+
+    assert (result.sample_count < grid.sample_count).any()
+    np.testing.assert_array_equal(result.valid, ~np.isnan(result.coefficients).all(axis=1))
+    assert (result.sample_count[result.valid] >= 4).all()
+
+
 # ── streaming class ─────────────────────────────────────────────────
 
 
