@@ -410,8 +410,15 @@ def test_streaming_wrapper_reports_the_counts_the_stream_used():
     grid = senpy.window_grid(t, WINDOW_S, OVERLAP_S)
 
     assert (result.sample_count < grid.sample_count).any()
+    assert (result.sample_count <= grid.sample_count).all()  # never more than the window holds
     np.testing.assert_array_equal(result.valid, ~np.isnan(result.coefficients).all(axis=1))
     assert (result.sample_count[result.valid] >= 4).all()
+
+
+def test_window_grid_refuses_unsorted_timestamps():
+    t, _ = recording()
+    with pytest.raises(ValueError, match="sorted"):
+        senpy.window_grid(t[::-1], WINDOW_S, OVERLAP_S)
 
 
 # ── streaming class ─────────────────────────────────────────────────

@@ -240,6 +240,8 @@ def window_grid(
         raise ValueError("timestamps must be one-dimensional with at least two samples")
     hop_s = float(window_s - overlap_s)
     t_relative, origin = relative_seconds(timestamps, ts_unit, origin_s, hop_s)
+    if np.any(np.diff(t_relative) < 0.0):
+        raise ValueError("timestamps must be sorted")
     dt_median = median_spacing(t_relative)
     return grid_from_relative(
         t_relative,

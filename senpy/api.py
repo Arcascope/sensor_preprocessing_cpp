@@ -1046,8 +1046,15 @@ def compute_nustft_streaming(
     values = np.asarray(signal, dtype=np.float64)
     if len(timestamps) < 2:
         raise ValueError("compute_nustft_streaming requires at least two timestamps")
+    # The grid is built from the samples in time order. The stream sees them as given, and
+    # drops any that arrive out of order; the counts below report what it actually used.
     grid = window_grid(
-        timestamps, window_s, overlap_s, origin_s=origin_s, min_samples=min_samples, ts_unit=ts_unit
+        np.sort(np.asarray(timestamps, dtype=np.float64)),
+        window_s,
+        overlap_s,
+        origin_s=origin_s,
+        min_samples=min_samples,
+        ts_unit=ts_unit,
     )
     # Stream times relative to the origin, exactly as the batch transforms see them.
     t, _ = _relative_seconds(timestamps, ts_unit, grid.origin_s, grid.hop_s)
