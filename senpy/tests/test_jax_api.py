@@ -64,9 +64,10 @@ def test_compute_nustft_returns_device_arrays_with_known_tone():
     )
 
     assert result.axis_order == "time_frequency"
-    assert result.coefficients.shape == (3, 33)
+    # 8 s of data, 4 s windows every 2 s: the one starting at 6 s holds the last 2 s.
+    assert result.coefficients.shape == (4, 33)
     assert result.frequencies.shape == (33,)
-    assert result.times.shape == (3,)
+    assert result.times.shape == (4,)
     peak = result.frequencies[jnp.argmax(jnp.mean(result.power, axis=0))]
     assert float(peak) == pytest.approx(3.0)
 
@@ -82,7 +83,7 @@ def test_compute_nufft_spectrogram_and_welch_stay_jax_backed():
         timestamps, signal, window_s=4.0, overlap_s=2.0
     )
 
-    assert spectrogram.Sxx.shape == (3, 129)
+    assert spectrogram.Sxx.shape == (4, 129)
     assert frequencies.shape == welch.shape == (129,)
 
 

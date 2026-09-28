@@ -56,14 +56,41 @@ def test_grid_starts_are_whole_hops_after_the_origin():
         assert inside.max() < grid.starts[k] + WINDOW_S
 
 
-def test_grid_ends_where_the_batch_transforms_always_have():
-    # Evenly spaced samples: the last window may end at most one sample past the data.
+def test_grid_runs_through_the_last_window_with_enough_samples():
+    # Evenly spaced samples every 0.5 s up to 59.5 s: the window starting at 58 s
+    # holds 4 samples (58.0-59.5), the one at 60 s none.
     t = np.arange(0.0, 60.0, 0.5)
     grid = senpy.window_grid(t, WINDOW_S, OVERLAP_S)
-    last_end = grid.starts[-1] + WINDOW_S
 
-    assert last_end <= t[-1] + 0.5
-    assert last_end + HOP_S > t[-1] + 0.5
+    assert grid.starts[-1] == 58.0
+    assert grid.sample_count[-1] == 4 and grid.valid[-1]
+    # The windows the data stops partway through are on the grid and valid.
+    assert grid.valid[grid.starts + WINDOW_S > t[-1]].all()
+    assert senpy.window_grid(t, WINDOW_S, OVERLAP_S, min_samples=5).starts[-1] == 56.0
+
+
+def test_trailing_sparse_windows_end_the_grid_but_interior_ones_stay():
+    t = np.concatenate([np.arange(0.0, 20.0, 0.5), [40.0, 59.0]])
+    grid = senpy.window_grid(t, WINDOW_S, OVERLAP_S)
+
+    # The last window with 4 samples starts at 18 s; windows up to it that hold
+    # fewer stay on the grid as invalid, the sparse ones after it are not on it.
+    assert grid.starts[-1] == 18.0
+    assert grid.valid.all()
+    kept = senpy.window_grid(np.concatenate([t, np.arange(80.0, 82.0, 0.5)]), WINDOW_S, OVERLAP_S)
+    assert kept.starts[-1] == 80.0
+    assert not kept.valid[(kept.starts > 18.0) & (kept.starts < 72.0)].any()
+
+
+def test_the_end_of_the_grid_does_not_hinge_on_rounding():
+    # np.arange drift leaves the last sample ~2e-10 s short of 239.98 s. The
+    # window 230-240 s is full either way, and the grid runs on to the window
+    # starting at 238 s, which holds the last 2 s.
+    t = np.arange(7.0, 240.0, 1 / 50)
+    grid = senpy.window_grid(t, WINDOW_S, OVERLAP_S, origin_s=0.0)
+
+    assert grid.starts[-1] == 238.0
+    assert grid.sample_count[grid.starts == 230.0][0] >= 499
 
 
 def test_dropout_windows_are_counted_not_lost():
@@ -347,13 +374,12 @@ def test_jax_returns_zero_rows_when_there_is_nothing_to_report(kwargs):
     assert result.window_index.size == result.sample_count.size == result.valid.size == 0
 
 
-def test_keep_mode_with_every_window_too_sparse_is_all_nan_not_an_error():
+def test_keep_mode_with_every_window_too_sparse_has_nothing_to_report():
     t, x = recording()
-    result = nustft(t, x, empty_windows="keep", min_samples=100_000)
 
-    assert result.valid.size == senpy.window_grid(t, WINDOW_S, OVERLAP_S).n_windows
-    assert not result.valid.any()
-    assert np.isnan(result.coefficients).all()
+    assert senpy.window_grid(t, WINDOW_S, OVERLAP_S, min_samples=100_000).n_windows == 0
+    with pytest.raises(ValueError, match="at least one window"):
+        nustft(t, x, empty_windows="keep", min_samples=100_000)
 
 
 # ── the 5.0 default change ──────────────────────────────────────────

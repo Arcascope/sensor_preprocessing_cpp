@@ -317,8 +317,9 @@ public:
     // Window k spans [origin + k*hop, origin + k*hop + secperseg). origin defaults (NaN) to the
     // first timestamp; samples before it belong to no window. Starts are k*hop, never an
     // accumulated sum, so senpy/_grid.py, the streaming transform and the JAX backend place every
-    // sample in the same window. Windows with fewer than min_samples samples are not transformed;
-    // grid_sample_counts still reports them, so callers can rebuild the full grid.
+    // sample in the same window. The grid runs through the last window with at least min_samples
+    // samples. Windows before it with fewer are not transformed; grid_sample_counts still reports
+    // them, so callers can rebuild the full grid.
     static NUSTFTResult computeNUSTFT(
         const std::vector<double> &timestamps,
         const std::vector<double> &signal,
@@ -406,7 +407,9 @@ public:
         std::vector<double> t_rel(n);
         for (size_t i = 0; i < n; ++i)
             t_rel[i] = timestamps[i] - origin;
-        const double limit = t_rel[n - 1] + dt_median;
+        // Windows starting after the last sample hold none; the grid then ends at the last
+        // window with min_samples samples (trimmed below).
+        const double t_last = t_rel[n - 1];
 
         // Use two-pointer indices to avoid rescanning timestamps for every window
         size_t start_idx = 0;
@@ -415,7 +418,7 @@ public:
         {
             const double win_start = static_cast<double>(w) * hop_dur;
             const double win_end = win_start + win_dur;
-            if (!(win_end <= limit))
+            if (!(win_start <= t_last))
                 break;
 
             // Advance start_idx to the first sample >= win_start
@@ -532,6 +535,9 @@ public:
             window_centres.push_back(win_start + win_dur / 2.0);
             window_indices.push_back(w);
         }
+
+        // The grid ends at the last window with enough data to transform.
+        grid_sample_counts.resize(window_indices.empty() ? 0 : static_cast<size_t>(window_indices.back()) + 1);
 
         // Build result
         NUSTFTResult result;
@@ -1668,8 +1674,6 @@ public:
     }
 
     // Emits every window the stream has passed the end of, oldest first, and forgets it.
-    // The readiness test matches computeNUSTFT's loop bound, which admits a final window whose
-    // end is within one sample period of the last timestamp.
     std::vector<StreamingNUSTFTWindow> drain()
     {
         std::vector<StreamingNUSTFTWindow> ready;
@@ -1680,8 +1684,8 @@ public:
         // input, no sample belonging to it can arrive after that. Reporting a window even one
         // sample period early would strand the samples that a packet whose clock drifted
         // backwards still owes it -- and computeNUSTFT, which sees the whole recording, would
-        // have counted them. The trailing window computeNUSTFT admits when it is within one
-        // sample period of complete comes out of flush() instead.
+        // have counted them. The trailing windows the data stops partway through come out of
+        // flush() instead.
         const double reach = newest_ - origin_ - win_dur_;
         if (reach < 0.0)
             return ready;
@@ -1703,8 +1707,8 @@ public:
         return ready;
     }
 
-    // Emits everything still open, however partial, and resets to empty. Unlike drain(), this
-    // reports the trailing window computeNUSTFT would have stopped short of.
+    // Emits everything still open, however partial, and resets to empty: the trailing windows
+    // the data stops partway through, which computeNUSTFT also reports.
     std::vector<StreamingNUSTFTWindow> flush()
     {
         std::vector<StreamingNUSTFTWindow> ready;

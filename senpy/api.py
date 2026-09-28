@@ -1075,11 +1075,9 @@ def compute_nustft_streaming(
     windows: List[StreamingWindow] = []
     for start in range(0, len(t), chunk):
         windows.extend(transform.push(t[start : start + chunk], values[start : start + chunk]))
-    # push() only reports windows the stream has passed the end of. compute_nustft, which sees
-    # where the recording stops, also emits a final window that ends within one sample period
-    # of the last timestamp; take that one out of the flush and drop anything past the grid.
+    # push() only reports windows the stream has passed the end of; the trailing windows the
+    # data stops partway through come out of the flush.
     windows.extend(transform.flush())
-    windows = [w for w in windows if w.index < grid.n_windows]
 
     if grid.n_windows == 0 or (empty_windows == "drop" and not windows):
         raise ValueError("compute_nustft_streaming requires enough data for at least one window")

@@ -57,14 +57,10 @@ def batch_equivalent(t, signal, chunk=137, **kwargs):
     """Streams the whole array and returns the windows ``compute_nustft`` would report.
 
     ``push`` only reports windows the stream has passed the end of, which is all a live stream
-    can honestly say. ``compute_nustft`` knows where the recording stops, so it also emits a
-    final window ending within one sample period of the last timestamp; that one comes out of
-    the flush.
+    can honestly say. The windows the data stops partway through come out of the flush.
     """
     transform, windows = stream_through(t, signal, chunk=chunk, **kwargs)
-    limit = float(t[-1]) + 1.0 / FS
-    windows = windows + [w for w in transform.flush() if w.start + WINDOW_S <= limit]
-    return transform, windows
+    return transform, windows + transform.flush()
 
 
 def relative_deviation(actual, expected):
@@ -144,15 +140,17 @@ def test_dropouts_leave_holes_rather_than_shifting_windows():
     assert windows[indices.index(3)].sample_count < 3000
 
 
-def test_flush_reports_the_trailing_window_compute_nustft_stops_short_of():
+def test_flush_reports_the_trailing_windows_push_cannot():
     t, signal = strap_stream(seconds=125, gaps=())
     transform, windows = stream_through(t, signal)
     reference = senpy.compute_nustft(t, signal, window_s=WINDOW_S, overlap_s=0.0)
 
-    assert len(windows) == len(reference.times)
+    # Windows 0-3 are complete; window 4 (120-150 s) holds the last 5 s.
+    assert [w.index for w in windows] == [0, 1, 2, 3]
     tail = transform.flush()
     assert [w.index for w in tail] == [4]
     assert tail[0].sample_count == 500
+    assert len(reference.times) == 5
 
 
 def test_convenience_wrapper_reproduces_compute_nustft():
