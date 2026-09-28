@@ -992,6 +992,7 @@ def compute_nustft_many(
     rows_per_call: int = DEFAULT_ROWS_PER_CALL,
     max_in_flight: int = 3,
     build_threads: int = 4,
+    enable_x64: bool = False,
 ) -> List[List[Any]]:
     """Transform many multi-channel recordings at device throughput.
 
@@ -1012,6 +1013,12 @@ def compute_nustft_many(
     before the copy back. Host buffers are float32, or float64 when JAX x64
     is enabled. Local sample coordinates are computed on the host in float64
     before that cast, so long recordings keep their phase precision.
+
+    ``enable_x64=True`` enables JAX's process-wide 64-bit mode before buffers
+    are allocated. This is useful on macOS's CPU backend when close numerical
+    agreement with the double-precision native transform matters. It is opt-in
+    because 64-bit mode affects all JAX work in the process and is unavailable
+    on some accelerators, including Metal.
 
     Like the other transforms here, a recording with nothing to report gets
     zero rows rather than an error.
@@ -1041,6 +1048,8 @@ def compute_nustft_many(
     _timestamp_scale(ts_unit)
 
     jax, jnp = _dependencies()
+    if enable_x64:
+        jax.config.update("jax_enable_x64", True)
     host_dtype = np.float64 if jnp.asarray(0.0).dtype == np.float64 else np.float32
     complex_dtype = np.complex128 if host_dtype == np.float64 else np.complex64
 

@@ -24,6 +24,8 @@ python -m pip install https://github.com/Arcascope/sensor_preprocessing_cpp/rele
 
 Installing from source, `pip install git+https://github.com/Arcascope/sensor_preprocessing_cpp.git@4.0.1`,
 compiles the native extension locally and requires a C++17 toolchain, CMake, and pybind11.
+On macOS it also requires Homebrew's OpenMP runtime (`brew install libomp`). senpy discovers
+that prefix itself; custom installations can set `LIBOMP_PREFIX`.
 
 Release wheels are built by `.github/workflows/release-wheel.yml` (attached to a published
 release, or run manually to backfill a tag) and published to PyPI via OpenID Connect trusted
@@ -186,6 +188,12 @@ one per recording) for the full grid and its sample counts. Batch sizes remain
 a hardware-specific throughput setting: measure with `block_until_ready()` and
 a CUDA profiler before claiming GPU saturation.
 
+On macOS, the standard JAX wheel uses the CPU backend. Pass `enable_x64=True`
+to `compute_nustft_many` when double-precision parity with the native CPU
+transform is more important than float32 throughput. This enables JAX's
+process-wide x64 setting before senpy allocates its buffers. Leave it off for
+Metal, whose kernels do not support float64.
+
 ## Streaming NUSTFT
 
 `StreamingNUSTFT` computes the **same coefficients** from a live stream: 
@@ -257,4 +265,3 @@ band at 30 s windows costs about 150 000 multiply-accumulates per second of stre
 * **Timestamp precision.** Absolute unix seconds in float64 resolve to about half a microsecond,
   which is a ~1e-5 relative phase error at the top of a 5 Hz band. Pass times relative to a recent
   origin when sub-microsecond timing matters.
-
