@@ -2092,14 +2092,19 @@ void free_motion_features_cpp(MotionFeaturesResult *ptr)
 
 namespace py = pybind11;
 
+// Every array argument is declared c_style | forcecast: the wrappers read request().ptr as a
+// dense buffer, so pybind11 must hand them one. A strided view (a column of an [N, C] array)
+// or a non-float64 dtype is copied into a contiguous float64 array on the way in, rather than
+// being read with the wrong stride.
+
 namespace py = pybind11;
 
 // Wrapper functions to convert between NumPy arrays and std::vector
 py::dict resampleAccelerometer_wrapper(
-    py::array_t<int64_t> timestamps,
-    py::array_t<double> x,
-    py::array_t<double> y,
-    py::array_t<double> z,
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> timestamps,
+    py::array_t<double, py::array::c_style | py::array::forcecast> x,
+    py::array_t<double, py::array::c_style | py::array::forcecast> y,
+    py::array_t<double, py::array::c_style | py::array::forcecast> z,
     double targetFs)
 {
     auto ts_buf = timestamps.request();
@@ -2146,10 +2151,10 @@ py::dict resampleAccelerometer_wrapper(
 }
 
 py::dict resampleAccelerometerCubic_wrapper(
-    py::array_t<int64_t> timestamps,
-    py::array_t<double> x,
-    py::array_t<double> y,
-    py::array_t<double> z,
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> timestamps,
+    py::array_t<double, py::array::c_style | py::array::forcecast> x,
+    py::array_t<double, py::array::c_style | py::array::forcecast> y,
+    py::array_t<double, py::array::c_style | py::array::forcecast> z,
     double targetFs)
 {
     auto ts_buf = timestamps.request();
@@ -2196,10 +2201,10 @@ py::dict resampleAccelerometerCubic_wrapper(
 }
 
 py::dict computeJerk_wrapper(
-    py::array_t<int64_t> timestamps,
-    py::array_t<double> x,
-    py::array_t<double> y,
-    py::array_t<double> z,
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> timestamps,
+    py::array_t<double, py::array::c_style | py::array::forcecast> x,
+    py::array_t<double, py::array::c_style | py::array::forcecast> y,
+    py::array_t<double, py::array::c_style | py::array::forcecast> z,
     bool diff = true)
 {
     auto ts_buf = timestamps.request();
@@ -2240,9 +2245,9 @@ py::dict computeJerk_wrapper(
 }
 
 py::array_t<double> computeMagnitude_wrapper(
-    py::array_t<double> x,
-    py::array_t<double> y,
-    py::array_t<double> z)
+    py::array_t<double, py::array::c_style | py::array::forcecast> x,
+    py::array_t<double, py::array::c_style | py::array::forcecast> y,
+    py::array_t<double, py::array::c_style | py::array::forcecast> z)
 {
     auto x_buf = x.request();
     auto y_buf = y.request();
@@ -2270,7 +2275,7 @@ py::array_t<double> computeMagnitude_wrapper(
 }
 
 py::dict computeSpectrogram_wrapper(
-    py::array_t<double> signal,
+    py::array_t<double, py::array::c_style | py::array::forcecast> signal,
     double fs,
     int nperseg,
     int noverlap)
@@ -2322,8 +2327,8 @@ py::array_t<std::int64_t> int64VectorToPython(const std::vector<std::int64_t> &v
 }
 
 py::dict computeNUSTFT_wrapper(
-    py::array_t<double> timestamps,
-    py::array_t<double> signal,
+    py::array_t<double, py::array::c_style | py::array::forcecast> timestamps,
+    py::array_t<double, py::array::c_style | py::array::forcecast> signal,
     double secperseg,
     double secoverlap,
     double target_fs = 0.0,
@@ -2382,7 +2387,7 @@ py::dict computeNUSTFT_wrapper(
 }
 
 py::array_t<double> computeShortTimeFT_wrapper(
-    py::array_t<double> signal,
+    py::array_t<double, py::array::c_style | py::array::forcecast> signal,
     double fs,
     int nperseg,
     int noverlap)
@@ -2417,8 +2422,8 @@ py::array_t<double> computeShortTimeFT_wrapper(
 }
 
 py::dict computeNUFFTSpectrogram_wrapper(
-    py::array_t<double> timestamps,
-    py::array_t<double> signal,
+    py::array_t<double, py::array::c_style | py::array::forcecast> timestamps,
+    py::array_t<double, py::array::c_style | py::array::forcecast> signal,
     double secperseg,
     double secoverlap,
     double target_fs = 0.0,
@@ -2481,7 +2486,7 @@ py::dict computeNUFFTSpectrogram_wrapper(
 }
 
 py::dict computeMotionFeatures_wrapper(
-    py::array_t<double> jerkSignal,
+    py::array_t<double, py::array::c_style | py::array::forcecast> jerkSignal,
     double fs,
     int windowSize = 1500,
     int overlap = 750,
@@ -2569,7 +2574,7 @@ py::array_t<double> hannWindow_wrapper(int N)
 }
 
 py::array_t<double> gaussianFilter1D_wrapper(
-    py::array_t<double> data,
+    py::array_t<double, py::array::c_style | py::array::forcecast> data,
     double sigma,
     double truncate = 4.0)
 {
@@ -2587,8 +2592,8 @@ py::array_t<double> gaussianFilter1D_wrapper(
 }
 
 py::array_t<double> findSpectrogramPeaks_wrapper(
-    py::array_t<double> Sxx,
-    py::array_t<double> frequencies,
+    py::array_t<double, py::array::c_style | py::array::forcecast> Sxx,
+    py::array_t<double, py::array::c_style | py::array::forcecast> frequencies,
     double prominence_threshold,
     double scaling_factor = 60.0)
 {
@@ -2634,7 +2639,7 @@ py::array_t<double> findSpectrogramPeaks_wrapper(
 }
 
 py::array_t<int> findPeaks_wrapper(
-    py::array_t<double> signal,
+    py::array_t<double, py::array::c_style | py::array::forcecast> signal,
     double prominence_threshold)
 {
     auto sig_buf = signal.request();
@@ -2651,7 +2656,7 @@ py::array_t<int> findPeaks_wrapper(
 }
 
 py::array_t<double> rollingStd_wrapper(
-    py::array_t<double> data,
+    py::array_t<double, py::array::c_style | py::array::forcecast> data,
     double window_minutes,
     double seconds_per_window = 30.0)
 {
@@ -2669,7 +2674,7 @@ py::array_t<double> rollingStd_wrapper(
 }
 
 py::array_t<double> smoothSpectrogramPeaks_wrapper(
-    py::array_t<double> peaks,
+    py::array_t<double, py::array::c_style | py::array::forcecast> peaks,
     double sampling_rate,
     double max_change_per_sec = 10.0,
     double filter_sigma = 2.0)
@@ -2716,7 +2721,7 @@ public:
                       double fmax, double origin, bool detrend, int min_samples)
         : impl_(secperseg, secoverlap, secpersub, sample_rate, fmax, origin, detrend, min_samples) {}
 
-    py::list push(py::array_t<double> timestamps, py::array_t<double> signal)
+    py::list push(py::array_t<double, py::array::c_style | py::array::forcecast> timestamps, py::array_t<double, py::array::c_style | py::array::forcecast> signal)
     {
         auto ts_buf = timestamps.request();
         auto sig_buf = signal.request();
@@ -2901,14 +2906,14 @@ PYBIND11_MODULE(_core, m)
     m.def("next_power_of_2", [](int n)
           { return SensorProcessor::nextPowerOf2(n); }, "Find next power of 2 greater than or equal to n", py::arg("n"));
 
-    m.def("compute_median", [](py::array_t<double> data)
+    m.def("compute_median", [](py::array_t<double, py::array::c_style | py::array::forcecast> data)
           {
               auto buf = data.request();
               std::vector<double> vec(static_cast<double*>(buf.ptr), 
                                       static_cast<double*>(buf.ptr) + buf.size);
               return SensorProcessor::computeMedian(vec); }, "Compute median of data", py::arg("data"));
 
-    m.def("compute_percentile", [](py::array_t<double> data, double percentile)
+    m.def("compute_percentile", [](py::array_t<double, py::array::c_style | py::array::forcecast> data, double percentile)
           {
               auto buf = data.request();
               std::vector<double> vec(static_cast<double*>(buf.ptr), 
