@@ -4,9 +4,9 @@ Window ``k`` (``k >= 0``) spans ``[origin + k * hop, origin + k * hop + window)`
 on the timestamps' own clock, in seconds. Its start is computed by
 multiplication, never by accumulating ``hop``, so every backend -- the C++
 batch transform, the streaming transform, the JAX transform and the JAX packer
--- puts the same sample in the same window. The grid runs while a window ends
-no later than one median sample period past the last timestamp, the bound the
-batch transforms have always used.
+-- puts the same sample in the same window. The grid runs through the last
+window holding at least ``min_samples`` samples: every window with enough data
+is transformed, at the end of a recording as anywhere else.
 
 Timestamps are measured from the origin once, by :func:`relative_seconds`,
 and every backend is handed those relative times. That is what makes the
@@ -137,22 +137,38 @@ def median_spacing(t_s: NDArray[np.float64]) -> float:
     return float(positive[positive.size // 2])
 
 
-def window_count(last_relative_s: float, dt_median_s: float, window_s: float, hop_s: float) -> int:
-    """How many windows fit: those with ``k * hop + window <= last + dt_median``.
+def last_window_start(last_relative_s: float, hop_s: float) -> int:
+    """Index of the last window starting at or before the last sample; -1 if none.
 
-    ``last_relative_s`` is the last timestamp minus the origin. The estimate is
-    corrected against the exact comparison, so the count agrees with a loop
-    that tests each window in turn.
+    Windows starting later hold no samples. The estimate is corrected against
+    the exact comparison, so it agrees with a loop that tests each start.
     """
-    limit = last_relative_s + dt_median_s
-    if not math.isfinite(limit) or window_s > limit:
-        return 0
-    n = int(math.floor((limit - window_s) / hop_s)) + 1
-    while n > 0 and (n - 1) * hop_s + window_s > limit:
-        n -= 1
-    while n * hop_s + window_s <= limit:
-        n += 1
-    return n
+    if not math.isfinite(last_relative_s) or last_relative_s < 0.0:
+        return -1
+    k = int(math.floor(last_relative_s / hop_s))
+    while k >= 0 and k * hop_s > last_relative_s:
+        k -= 1
+    while (k + 1) * hop_s <= last_relative_s:
+        k += 1
+    return k
+
+
+def window_count(
+    t_relative_s: NDArray[np.float64], window_s: float, hop_s: float, min_samples: int
+) -> int:
+    """How many windows the grid has: through the last one with ``min_samples`` samples.
+
+    ``t_relative_s`` are sorted timestamps minus the origin. Windows before
+    that last one stay on the grid whatever they hold; with
+    ``empty_windows="keep"`` those without enough samples are NaN rows.
+    """
+    t = np.asarray(t_relative_s, dtype=np.float64)
+    starts = np.arange(last_window_start(float(t[-1]), hop_s) + 1, dtype=np.int64) * hop_s
+    counts = np.searchsorted(t, starts + window_s, side="left") - np.searchsorted(
+        t, starts, side="left"
+    )
+    enough = np.flatnonzero(counts >= min_samples)
+    return int(enough[-1]) + 1 if enough.size else 0
 
 
 @dataclass(frozen=True)
@@ -164,7 +180,7 @@ class WindowGrid:
             seconds. A result's ``times`` are measured from it.
         window_s: Window duration in seconds.
         hop_s: Window hop in seconds (``window_s - overlap_s``).
-        dt_median_s: Upper median sample spacing, which sets the grid's end.
+        dt_median_s: Upper median sample spacing, which sets the transform size.
         first: Index of each window's first sample, shape ``(n_windows,)``.
         stop: One past each window's last sample, shape ``(n_windows,)``.
         min_samples: Fewest samples a window needs to be transformed.
@@ -263,7 +279,7 @@ def grid_from_relative(
     min_samples: int,
 ) -> WindowGrid:
     """Build the grid from timestamps already expressed relative to the origin."""
-    n = window_count(float(t_relative_s[-1]), dt_median_s, window_s, hop_s)
+    n = window_count(t_relative_s, window_s, hop_s, min_samples)
     starts = np.arange(n, dtype=np.int64) * hop_s
     first = np.searchsorted(t_relative_s, starts, side="left").astype(np.int64)
     stop = np.searchsorted(t_relative_s, starts + window_s, side="left").astype(np.int64)

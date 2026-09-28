@@ -40,7 +40,8 @@ window grid, and they all put the same samples in the same windows:
 
 * Window `k` spans `[origin + k*hop, origin + k*hop + window_s)`, with `hop = window_s - overlap_s`.
   Starts are `k*hop`, never an accumulated sum. Samples before the origin belong to no window.
-* The grid runs while a window ends no later than one median sample period past the last sample.
+* The grid runs through the last window holding at least `min_samples` samples, so the trailing
+  windows the recording stops partway through are transformed like any other window with data.
 * `times` are window centres, `k*hop + window_s/2`, measured from the origin.
 
 `senpy.window_grid(timestamps, window_s, overlap_s, origin_s=..., min_samples=...)` returns that
@@ -246,11 +247,10 @@ band at 30 s windows costs about 150 000 multiply-accumulates per second of stre
   subwindow straddles a window edge; one that did could not be shared by the windows either side.
 * **Sample rate.** Supplied rather than measured: it sets the magnitude scale and the grid size.
   `compute_nustft` takes the median spacing over the whole recording, which a stream cannot see.
-* **The trailing window.** `push` reports only windows the stream has passed the end of, which is 
-  all a live stream can honestly say. `compute_nustft` knows where the recording stops and also 
-  emits a final window ending within one sample period of the last timestamp; that one comes out 
-  of `flush()`. `compute_nustft_streaming` applies this rule for you and is the function to compare
-  the two paths with.
+* **The trailing windows.** `push` reports only windows the stream has passed the end of, which is
+  all a live stream can honestly say. The windows the data stops partway through come out of
+  `flush()`, as `compute_nustft` reports them. `compute_nustft_streaming` does both and is the
+  function to compare the two paths with.
 * **The Nyquist bin** (present only when `fmax` is unset) is the true $+N/2$ coefficient.
   `compute_nustft` reports its conjugate there, an artifact of reading that bin out of the aliased
   FINUFFT mode. Magnitudes are identical.

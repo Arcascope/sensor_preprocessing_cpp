@@ -34,13 +34,13 @@ from . import _packing
 from ._grid import (
     DEFAULT_MIN_SAMPLES,
     OriginSpec,
+    last_window_start,
     median_spacing,
     relative_seconds,
     resolve_empty_windows,
     resolve_origin,
     timestamp_scale,
     validate_min_samples,
-    window_count,
 )
 
 
@@ -794,10 +794,9 @@ def _compute_nustft(
     n_pos_freqs = nfft_padded // 2 + 1
 
     # The same grid senpy._grid.window_grid builds on the host: window k starts
-    # at k * hop after the origin.
+    # at k * hop after the origin, through the last window with min_samples.
     t_end = float(host_t[-1]) if host_t is not None else float(jax.device_get(t[-1]))
-    n_windows = window_count(t_end, dt_median, window_s, hop_s)
-    starts = np.arange(n_windows, dtype=np.int64) * hop_s
+    starts = np.arange(last_window_start(t_end, hop_s) + 1, dtype=np.int64) * hop_s
 
     complex_dtype = jnp.result_type(s, 1j)
     frequencies = jnp.arange(n_pos_freqs, dtype=t.dtype) / window_s
@@ -817,7 +816,7 @@ def _compute_nustft(
             origin_s=origin,
         )
 
-    if n_windows == 0:
+    if starts.size == 0:
         return empty_result()
 
     if host_t is not None:
@@ -829,6 +828,13 @@ def _compute_nustft(
         end_indices = np.asarray(
             jax.device_get(jnp.searchsorted(t, starts_device + window_s, side="left"))
         )
+    enough = np.flatnonzero(end_indices - start_indices >= min_samples)
+    n_windows = int(enough[-1]) + 1 if enough.size else 0
+    if n_windows == 0:
+        return empty_result()
+    starts = starts[:n_windows]
+    start_indices = start_indices[:n_windows]
+    end_indices = end_indices[:n_windows]
     grid_counts = (end_indices - start_indices).astype(np.int64)
     mode_indices = jnp.concatenate(
         (jnp.arange(nfft_padded // 2, nfft_padded), jnp.array([0]))
