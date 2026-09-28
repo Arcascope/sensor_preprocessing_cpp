@@ -23,18 +23,17 @@ import math
 import os
 import platform
 import subprocess
-from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, DefaultDict, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Any, List, Literal, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
+from . import _packing
 from ._grid import (
     DEFAULT_MIN_SAMPLES,
     OriginSpec,
-    grid_from_relative,
     median_spacing,
     relative_seconds,
     resolve_empty_windows,
@@ -583,82 +582,53 @@ def pack_nustft_window_batches(
             raise ValueError("origin_s must be a single origin or one per recording")
     else:
         origins = [origin_s] * len(recordings)
-    hop_s = window_s - overlap_s
-    groups: DefaultDict[Tuple[int, int], List[Tuple[Any, ...]]] = defaultdict(list)
-
+    hop_s = float(window_s - overlap_s)
+    packed_recordings = []
     for recording_index, (timestamps, samples) in enumerate(recordings):
-        t = np.asarray(timestamps, dtype=np.float64)
-        s = np.asarray(samples)
-        if t.ndim != 1 or s.ndim != 2 or s.shape != (t.size, 3):
+        if np.ndim(samples) != 2 or np.shape(samples)[1:] != (3,):
             raise ValueError(
                 "each recording must be a (timestamps[N], samples[N, 3]) pair"
             )
-        if not np.issubdtype(s.dtype, np.number) or np.iscomplexobj(s):
-            raise ValueError("accelerometer samples must be real numeric values")
-        if t.size < 2:
-            raise ValueError("each recording requires at least two timestamps")
-        if not np.all(np.isfinite(t)):
-            raise ValueError("timestamps must be finite")
-        if not np.all(np.isfinite(s)):
-            raise ValueError("accelerometer samples must be finite")
-        t, origin = relative_seconds(t, ts_unit, origins[recording_index], hop_s)
-        diffs = np.diff(t)
-        if np.any(diffs < 0.0):
-            raise ValueError("timestamps must be sorted")
-        dt_median = median_spacing(t)
-        median_fs = 1.0 / dt_median
-        nfft = int(window_s * median_fs)
-        if nfft < 2:
-            raise ValueError("window_s is too short for the observed sampling density")
-        nfft_padded = _next_power_of_two(nfft)
-        grid = grid_from_relative(
-            t,
-            origin_s=origin,
-            window_s=float(window_s),
-            hop_s=float(hop_s),
-            dt_median_s=dt_median,
-            min_samples=min_samples,
-        )
-        for window_index in np.flatnonzero(grid.valid).tolist():
-            first = int(grid.first[window_index])
-            last = int(grid.stop[window_index])
-            start = window_index * hop_s
-            source_width = _next_power_of_two(last - first)
-            local_points = 2.0 * np.pi * ((t[first:last] - start) / window_s) - np.pi
-            groups[(nfft_padded, source_width)].append(
-                (
-                    local_points,
-                    np.asarray(s[first:last]),
-                    recording_index,
-                    window_index,
-                    start + window_s / 2.0,
-                    median_fs,
-                )
+        packed_recordings.append(
+            _packing.discover(
+                timestamps,
+                samples,
+                window_s=float(window_s),
+                overlap_s=float(overlap_s),
+                ts_unit=ts_unit,
+                origin_s=origins[recording_index],
+                min_samples=min_samples,
             )
+        )
 
     packed: List[PackedNUSTFTWindowBatch] = []
-    for (nfft_padded, source_width), rows in sorted(groups.items()):
-        for chunk_start in range(0, len(rows), batch_size):
-            chunk = rows[chunk_start : chunk_start + batch_size]
-            dtype = np.result_type(*(row[1].dtype for row in chunk), np.float32)
-            points = np.zeros((batch_size, source_width), dtype=dtype)
-            signals = np.zeros((batch_size, 3, source_width), dtype=dtype)
-            valid = np.zeros((batch_size, source_width), dtype=bool)
+    for (nfft_padded, source_width), keys in _packing.buckets(
+        packed_recordings, group_major=False
+    ).items():
+        for chunk in _packing.chunks(keys, batch_size):
+            rec_keys, _, window_keys = chunk
+            n = rec_keys.size
+            dtype = np.result_type(
+                *(packed_recordings[r].groups[0].dtype for r in np.unique(rec_keys).tolist()),
+                np.float32,
+            )
+            points, signals, valid, median_fss = _packing.gather(
+                packed_recordings,
+                chunk,
+                width=source_width,
+                n_rows=batch_size,
+                window_s=float(window_s),
+                hop_s=hop_s,
+                dtype=dtype,
+            )
             row_valid = np.zeros(batch_size, dtype=bool)
+            row_valid[:n] = True
             recording_indices = np.full(batch_size, -1, dtype=np.int64)
+            recording_indices[:n] = rec_keys
             window_indices = np.full(batch_size, -1, dtype=np.int64)
+            window_indices[:n] = window_keys
             times = np.full(batch_size, np.nan, dtype=np.float64)
-            median_fss = np.ones(batch_size, dtype=dtype)
-            for row_index, (row_points, row_signals, recording_index, window_index, time, row_fs) in enumerate(chunk):
-                count = row_points.size
-                points[row_index, :count] = row_points
-                signals[row_index, :, :count] = np.asarray(row_signals, dtype=dtype).T
-                valid[row_index, :count] = True
-                row_valid[row_index] = True
-                recording_indices[row_index] = recording_index
-                window_indices[row_index] = window_index
-                times[row_index] = time
-                median_fss[row_index] = row_fs
+            times[:n] = window_keys * hop_s + window_s / 2.0
             tau = (points + np.pi) / (2.0 * np.pi)
             hann = valid * 0.5 * (1.0 - np.cos(2.0 * np.pi * tau))
             packed.append(
@@ -982,12 +952,227 @@ def compute_nufft_welch(
     ).welch(kind=kind, average=average)
 
 
+#: Rows per device call in :func:`compute_nustft_many`. The packer's usual
+#: 128 leaves a large GPU mostly idle; a row costs ~0.2 MB of intermediates
+#: at ``eps=1e-6`` and 512-sample windows.
+DEFAULT_ROWS_PER_CALL = 8192
+
+
+@lru_cache(maxsize=None)
+def _trimmed_window_batch_transform(nfft_padded: int, detrend: bool, eps: float, n_keep: int) -> Any:
+    """The cached batch transform, keeping only the first ``n_keep`` bins on the device."""
+    jax, _ = _dependencies()
+    inner = _nustft_window_batch_transform(nfft_padded, detrend, eps)
+
+    @jax.jit
+    def transform(points: Any, signals: Any, valid: Any, median_fs: Any) -> Any:
+        return inner(points, signals, valid, median_fs)[..., :n_keep]
+
+    return transform
+
+
+def compute_nustft_many(
+    recordings: Sequence[Tuple[Any, Any]],
+    *,
+    window_s: float,
+    overlap_s: float,
+    ts_unit: str = "s",
+    target_fs: Optional[float] = None,
+    detrend: bool = True,
+    eps: float = 1e-6,
+    origin_s: Union[OriginSpec, Sequence[OriginSpec]] = None,
+    empty_windows: Optional[str] = None,
+    min_samples: int = DEFAULT_MIN_SAMPLES,
+    rows_per_call: int = DEFAULT_ROWS_PER_CALL,
+    max_in_flight: int = 3,
+    build_threads: int = 4,
+) -> List[List[Any]]:
+    """Transform many multi-channel recordings at device throughput.
+
+    Each recording is ``(timestamps[N], samples[N, C])`` for any ``C``; a 1-D
+    ``samples`` is one channel. The result is indexed
+    ``[recording][channel]``, each a host :class:`senpy.api.NUSTFTResult` on
+    the grid :func:`senpy.window_grid` describes, with ``origin_s``,
+    ``empty_windows`` and ``min_samples`` as in
+    :func:`senpy.api.compute_nustft`.
+
+    It computes what :func:`pack_nustft_window_batches` followed by
+    :func:`compute_nustft_window_batch` does, but arranges the work for a
+    busy device: windows from every recording are gathered with vectorized
+    NumPy into large batches (``rows_per_call`` windows) on
+    ``build_threads`` host threads, which run ahead while the device works;
+    up to ``max_in_flight`` batches are dispatched before the host waits on
+    the oldest; and bins above ``target_fs / 2`` are dropped on the device,
+    before the copy back. Host buffers are float32, or float64 when JAX x64
+    is enabled. Local sample coordinates are computed on the host in float64
+    before that cast, so long recordings keep their phase precision.
+
+    Like the other transforms here, a recording with nothing to report gets
+    zero rows rather than an error.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .api import NUSTFTResult
+
+    empty_windows = resolve_empty_windows(empty_windows, stacklevel=3)
+    min_samples = validate_min_samples(min_samples)
+    if not window_s > 0.0:
+        raise ValueError("window_s must be > 0")
+    if overlap_s < 0.0 or overlap_s >= window_s:
+        raise ValueError("overlap_s must satisfy 0 <= overlap_s < window_s")
+    if target_fs is not None and target_fs < 0.0:
+        raise ValueError("target_fs must be >= 0")
+    if eps <= 0.0:
+        raise ValueError("eps must be > 0")
+    for name, value in (
+        ("rows_per_call", rows_per_call),
+        ("max_in_flight", max_in_flight),
+        ("build_threads", build_threads),
+    ):
+        if int(value) != value or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    rows_per_call, max_in_flight, build_threads = int(rows_per_call), int(max_in_flight), int(build_threads)
+    _timestamp_scale(ts_unit)
+
+    jax, jnp = _dependencies()
+    host_dtype = np.float64 if jnp.asarray(0.0).dtype == np.float64 else np.float32
+    complex_dtype = np.complex128 if host_dtype == np.float64 else np.complex64
+
+    recordings = list(recordings)
+    if isinstance(origin_s, (list, tuple, np.ndarray)):
+        origins = list(origin_s)
+        if len(origins) != len(recordings):
+            raise ValueError("origin_s must be a single origin or one per recording")
+    else:
+        origins = [origin_s] * len(recordings)
+    hop_s = float(window_s - overlap_s)
+
+    packed = []
+    n_channels = []
+    for index, (timestamps, samples) in enumerate(recordings):
+        samples = np.asarray(samples)
+        n_channels.append(1 if samples.ndim == 1 else samples.shape[-1])
+        rec = _packing.discover(
+            timestamps,
+            samples,
+            window_s=float(window_s),
+            overlap_s=float(overlap_s),
+            ts_unit=ts_unit,
+            origin_s=origins[index],
+            min_samples=min_samples,
+            dtype=host_dtype,
+        )
+        if target_fs is not None and target_fs > rec.median_fs:
+            raise ValueError(
+                "target_fs cannot exceed the observed median sampling rate in the JAX backend"
+            )
+        packed.append(rec)
+
+    def kept_bins(nfft_padded: int) -> int:
+        n_pos = nfft_padded // 2 + 1
+        if target_fs is not None and target_fs > 0.0:
+            return min(n_pos, int(math.floor((target_fs / 2.0) * window_s + 0.5)) + 1)
+        return n_pos
+
+    # Coefficients land here, [group][row in rec.rows order, channel, bin].
+    outputs = [
+        [np.empty((rec.rows.size, 3, kept_bins(rec.nfft_padded)), dtype=complex_dtype) for _ in rec.groups]
+        for rec in packed
+    ]
+
+    work = [
+        (nfft_padded, width, chunk)
+        for (nfft_padded, width), keys in _packing.buckets(packed, group_major=True).items()
+        for chunk in _packing.chunks(keys, rows_per_call)
+    ]
+
+    def build(item):
+        _, width, chunk = item
+        return _packing.gather(
+            packed,
+            chunk,
+            width=width,
+            n_rows=_packing.padded_rows(chunk[0].size, rows_per_call),
+            window_s=float(window_s),
+            hop_s=hop_s,
+            dtype=host_dtype,
+        )
+
+    in_flight: List[Tuple[Any, Any]] = []
+
+    def drain_oldest() -> None:
+        result, chunk = in_flight.pop(0)
+        rec_keys, group_keys, window_keys = chunk
+        host = np.asarray(result)[: rec_keys.size]
+        for r in np.unique(rec_keys).tolist():
+            in_rec = rec_keys == r
+            # rec.rows is sorted, so a window's row is found by search.
+            positions = np.searchsorted(packed[r].rows, window_keys[in_rec])
+            for g in np.unique(group_keys[in_rec]).tolist():
+                in_group = group_keys[in_rec] == g
+                outputs[r][g][positions[in_group]] = host[np.flatnonzero(in_rec)[in_group]]
+
+    with ThreadPoolExecutor(max_workers=build_threads) as pool:
+        queue = iter(work)
+        pending = []
+        for item in queue:
+            pending.append((item, pool.submit(build, item)))
+            if len(pending) >= 2 * build_threads:
+                break
+        while pending:
+            item, future = pending.pop(0)
+            following = next(queue, None)
+            if following is not None:
+                pending.append((following, pool.submit(build, following)))
+            nfft_padded, _, chunk = item
+            transform = _trimmed_window_batch_transform(
+                nfft_padded, bool(detrend), float(eps), kept_bins(nfft_padded)
+            )
+            in_flight.append((transform(*future.result()), chunk))
+            if len(in_flight) >= max_in_flight:
+                drain_oldest()
+    while in_flight:
+        drain_oldest()
+
+    results: List[List[Any]] = []
+    for rec, rec_outputs, channels in zip(packed, outputs, n_channels):
+        grid = rec.grid
+        n_keep = kept_bins(rec.nfft_padded)
+        frequencies = np.arange(n_keep, dtype=np.float64) / window_s
+        if empty_windows == "keep":
+            window_index = grid.window_index
+        else:
+            window_index = rec.rows
+        sample_count = grid.sample_count[window_index]
+        per_channel = []
+        for channel in range(channels):
+            block = rec_outputs[channel // 3][:, channel % 3, :]
+            if empty_windows == "keep":
+                dense = np.full((grid.n_windows, n_keep), np.nan, dtype=complex_dtype)
+                dense[rec.rows] = block
+                block = dense
+            per_channel.append(
+                NUSTFTResult(
+                    frequencies=frequencies,
+                    times=window_index * hop_s + window_s / 2.0,
+                    coefficients=block,
+                    window_index=window_index,
+                    sample_count=sample_count,
+                    valid=sample_count >= min_samples,
+                    origin_s=grid.origin_s,
+                )
+            )
+        results.append(per_channel)
+    return results
+
+
 __all__ = [
     "JaxNUSTFTResult",
     "JaxSpectrogramResult",
     "PackedNUSTFTWindowBatch",
     "compute_nustft_window_batch",
     "pack_nustft_window_batches",
+    "compute_nustft_many",
     "compute_nustft",
     "compute_nufft_spectrogram",
     "compute_nufft_welch",
