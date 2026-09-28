@@ -1046,8 +1046,9 @@ def compute_nustft_streaming(
     values = np.asarray(signal, dtype=np.float64)
     if len(timestamps) < 2:
         raise ValueError("compute_nustft_streaming requires at least two timestamps")
-    # The grid is built from the samples in time order. The stream sees them as given, and
-    # drops any that arrive out of order; the counts below report what it actually used.
+    # The grid is built from the samples in time order. The stream sees them as given: it drops
+    # a sample whose subwindow it has already closed (counted in dropped_samples), but disorder
+    # within one subwindow goes unnoticed. The counts below report what it actually used.
     grid = window_grid(
         np.sort(np.asarray(timestamps, dtype=np.float64)),
         window_s,

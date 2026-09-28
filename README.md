@@ -84,6 +84,10 @@ result.coefficients[~result.valid]   # all NaN: dropouts, visible on the grid
 Timestamps are measured from the origin once, in the input's own unit, before scaling to
 seconds, so Unix microsecond timestamps (~1.7e15) keep their full precision.
 
+Timestamps must be sorted. `window_grid` and `pack_nustft_window_batches` raise if they are not.
+The transforms themselves do not check, as in earlier releases: out-of-order samples near a
+window edge are silently assigned to the wrong window.
+
 ## JAX NUFFT (CPU / CUDA / Metal)
 
 The regular `senpy` API remains NumPy/C++ based. For a JAX-native NUFFT that
