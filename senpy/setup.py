@@ -146,6 +146,15 @@ class SenpyBuildExt(build_ext):
 
 include_dirs.append(finufft_include_dir)
 
+# CI builds release wheels, so target a portable baseline (matching the
+# top-level CMakeLists.txt); local builds tune for the build machine.
+if os.environ.get('CI') != 'true':
+    arch_flag = '-march=native'
+elif platform.system() == 'Darwin' and platform.machine() == 'arm64':
+    arch_flag = '-mcpu=apple-m1'
+else:
+    arch_flag = '-march=x86-64-v3'
+
 extra_link_args = [
     f'-L{finufft_lib_dir}',
     '-lfinufft',
@@ -167,7 +176,7 @@ ext_modules = [
         sources=sources,
         include_dirs=include_dirs,
         language='c++',
-        extra_compile_args=['-std=c++17', '-O3', '-march=x86-64-v3' if os.environ.get('CI') == 'true' else '-march=native', '-DPYTHON'],
+        extra_compile_args=['-std=c++17', '-O3', arch_flag, '-DPYTHON'],
         extra_link_args=extra_link_args,
     ),
 ]

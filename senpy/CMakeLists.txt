@@ -4,8 +4,11 @@ project(senpy)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Add optimization flags; CI runners use x86-64-v3 (AVX2) for portability.
-if(DEFINED ENV{CI} AND "$ENV{CI}" STREQUAL "true")
+# Add optimization flags; CI runners use a portable baseline (x86-64-v3, or
+# the Apple M1 on Apple Silicon).
+if(DEFINED ENV{CI} AND "$ENV{CI}" STREQUAL "true" AND APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -mcpu=apple-m1")
+elseif(DEFINED ENV{CI} AND "$ENV{CI}" STREQUAL "true")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=x86-64-v3")
 else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
