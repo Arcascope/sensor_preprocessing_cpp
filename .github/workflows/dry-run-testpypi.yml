@@ -115,9 +115,83 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+  build-wheel-macos:
+    name: Build macOS arm64 wheel (cp${{ matrix.python-version }})
+    needs: [resolve]
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # The wheel bundles Homebrew's libomp, so it can only claim the macOS
+      # version that libomp was built for.
+      - name: Install libomp and set deployment target
+        run: |
+          brew install libomp
+          prefix="$(brew --prefix libomp)"
+          minos="$(otool -l "$prefix/lib/libomp.dylib" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
+          echo "LIBOMP_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=$minos" >> "$GITHUB_ENV"
+          echo "libomp at $prefix, macOS deployment target $minos"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build wheel delocate
+
+      - name: Build wheel
+        run: python -m build --wheel --outdir ../dist
+        working-directory: senpy
+
+      - name: Bundle native libraries into wheel
+        run: |
+          cd dist
+          for whl in *.whl; do
+            delocate-wheel --require-archs arm64 -w repaired -v "$whl"
+            rm "$whl"
+          done
+          mv repaired/*.whl .
+          rmdir repaired
+          delocate-listdeps --all *.whl
+          cd ..
+
+      - name: List wheel
+        run: ls -lh dist
+
+      # Remove Homebrew's libomp so the smoke test proves the wheel is self-contained.
+      - name: Smoke test wheel
+        run: |
+          brew uninstall --ignore-dependencies libomp
+          python -m pip install dist/*.whl
+          cp senpy/example.py "$RUNNER_TEMP/example.py"
+          cd "$RUNNER_TEMP"
+          python -c "import pathlib, senpy; assert pathlib.Path(senpy.__file__).resolve().is_relative_to(pathlib.Path('${{ github.workspace }}').resolve()) is False; print('senpy imported successfully')"
+          python example.py
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: testpypi-wheel-macos-${{ matrix.python-version }}
+          path: dist/*.whl
+          if-no-files-found: error
+
   publish-testpypi:
     name: Publish to TestPyPI
-    needs: [resolve, build-wheel]
+    needs: [resolve, build-wheel, build-wheel-macos]
     runs-on: ubuntu-latest
     environment:
       name: testpypi

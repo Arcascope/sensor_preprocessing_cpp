@@ -13,7 +13,8 @@ python -m pip install arcascope-senpy
 python -m pip install 'arcascope-senpy[jax]'
 ```
 
-Prebuilt manylinux wheels are published for CPython 3.12, 3.13, and 3.14. Python 3.11 and other
+Prebuilt wheels are published for CPython 3.12, 3.13, and 3.14 on manylinux x86_64 and macOS
+arm64 (Apple Silicon; the macOS wheels bundle their OpenMP runtime). Python 3.11 and other
 platforms build from source on install.
 
 To install a specific precompiled wheel from a GitHub release instead:
