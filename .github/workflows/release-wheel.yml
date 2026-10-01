@@ -192,7 +192,9 @@ jobs:
           cache: pip
 
       # The wheel bundles Homebrew's libomp, so it can only claim the macOS
-      # version that libomp was built for.
+      # version that libomp was built for. setup-python's interpreters are
+      # universal2, which would compile _core for x86_64 too; libomp is
+      # arm64-only, so pin the extension and the wheel tag to arm64.
       - name: Install libomp and set deployment target
         run: |
           brew install libomp
@@ -200,6 +202,8 @@ jobs:
           minos="$(otool -l "$prefix/lib/libomp.dylib" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
           echo "LIBOMP_PREFIX=$prefix" >> "$GITHUB_ENV"
           echo "MACOSX_DEPLOYMENT_TARGET=$minos" >> "$GITHUB_ENV"
+          echo "ARCHFLAGS=-arch arm64" >> "$GITHUB_ENV"
+          echo "_PYTHON_HOST_PLATFORM=macosx-$minos-arm64" >> "$GITHUB_ENV"
           echo "libomp at $prefix, macOS deployment target $minos"
 
       - name: Install build tooling
