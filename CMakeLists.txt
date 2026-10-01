@@ -12,15 +12,21 @@ endif()
 
 # Compiler-specific optimizations
 # Note: -ffast-math is intentionally omitted — it breaks FINUFFT (IEEE-754 violations)
-# CI runners use x86-64-v3 (AVX2) for portability; local builds use native.
+# CI runners use a portable baseline -- x86-64-v3 (AVX2) on x86, the Apple M1
+# on Apple Silicon -- so release wheels run on any CPU of that family; local
+# builds use native.
 if(DEFINED ENV{CI} AND "$ENV{CI}" STREQUAL "true")
-    set(MARCH_FLAG "-march=x86-64-v3")
+    if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+        set(MARCH_FLAG "-mcpu=apple-m1")
+    else()
+        set(MARCH_FLAG "-march=x86-64-v3")
+    endif()
     # FINUFFT defaults FINUFFT_ARCH_FLAGS to "native" (-march=native), which bakes
     # the build machine's ISA (e.g. AVX-512) into libfinufft.so. Release wheels
     # must be portable, so pin the dependency to the same baseline as the rest of
     # the build. This must be a CACHE variable: FINUFFT's own CMakeLists declares
     # it with `CACHE`, and normal variables do not propagate into its scope.
-    set(FINUFFT_ARCH_FLAGS "-march=x86-64-v3" CACHE STRING "" FORCE)
+    set(FINUFFT_ARCH_FLAGS "${MARCH_FLAG}" CACHE STRING "" FORCE)
 else()
     set(MARCH_FLAG "-march=native -mtune=native")
     set(FINUFFT_ARCH_FLAGS "-march=native" CACHE STRING "" FORCE)
