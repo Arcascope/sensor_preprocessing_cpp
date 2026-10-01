@@ -179,6 +179,12 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
 
+    # setup.py runs `cmake --build --parallel` with no job count, which under
+    # Makefiles is an unbounded `make -j` and exhausts the runner's process
+    # limit. Ninja (a build requirement) defaults to roughly the core count.
+    env:
+      CMAKE_GENERATOR: Ninja
+
     steps:
       - name: Check out release source
         uses: actions/checkout@v7
